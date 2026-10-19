@@ -46,6 +46,8 @@ syscall_handler (struct intr_frame *f UNUSED) {
 	int fd = f->R.rdi;
 	switch (f->R.rax)
 	{
+		case SYS_HALT:
+			break;
 		case SYS_EXIT: {		/* exit(status) 첫 인자는 rdi로 전달 */
 			int status = (int)f->R.rdi;
 			struct thread *cur = thread_current();
@@ -61,10 +63,34 @@ syscall_handler (struct intr_frame *f UNUSED) {
 
 			thread_exit();		/* 내부에서 process_exit() 호출해 자원 정리하고 현재 스레드 종료 */
 		}
+		case SYS_FORK:
+			break;
+		case SYS_EXEC:
+			break;
+		case SYS_WAIT:
+			break;
+		case SYS_CREATE:
+			break;
+		case SYS_REMOVE:
+			break;
+		case SYS_OPEN:
+			break;
+		case SYS_FILESIZE:
+			break;
+		case SYS_READ:
+			break;
 		case SYS_WRITE:
 			if (fd == 1) {
 				putbuf(f->R.rsi, f->R.rdx);
 			}
+			break;
+		case SYS_SEEK:
+			break;
+		case SYS_TELL:
+			break;
+		case SYS_CLOSE:
+			break;
+		case SYS_DUP2:
 			break;
 		default:
 			break;
