@@ -314,17 +314,27 @@ syscall_handler (struct intr_frame *f UNUSED) {
 			}
 			break;
 		}
-		case SYS_SEEK:
-		/*
-		void
-		seek (int fd, unsigned position) {
-			syscall2 (SYS_SEEK, fd, position);
-		}
-		rax rdi 
-		*/
-			unsigned position = f->R.rdi;
+		case SYS_SEEK: {
+			/*
+			void
+			seek (int fd, unsigned position) {
+				syscall2 (SYS_SEEK, fd, position);
+			}
+			rax rdi rsi
+			*/
+			unsigned position = (unsigned)f->R.rsi;
+			struct file *file = fd_get(fd);
+
+			if (file == NULL) {	// 잘못된 fd면 아무것도 안 함 (반환값 없음)
+				break;
+			}
+
+			lock_acquire(&filesys_lock);
+			file_seek(file, position);
+			lock_release(&filesys_lock);
 
 			break;
+		}
 		case SYS_TELL: {
 			int fd = f->R.rdi;
 			struct file *file = fd_get(fd);
