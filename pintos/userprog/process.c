@@ -229,19 +229,16 @@ process_wait (tid_t child_tid) {
 	/* XXX: 힌트) process_wait (initd)를 하면 pintos가 종료되므로,
 	 * XXX:       process_wait를 구현하기 전에 여기에 무한 루프를
 	 * XXX:       추가해 두기를 권장함. */
-	// thread_set_priority(PRI_MIN);
-	// timer_sleep (TIMER_FREQ * 5);
-	// while(1);
 	
-	struct list_elem *e = list_begin(&thread_current()->children);
+	struct thread *curr = thread_current();
+	struct list_elem *e = list_begin(&curr->children);
 	
-	while (e != list_end(&thread_current()->children)) {
-		struct thread *child = list_entry(e, struct thread, process_elem);
-		if (child->tid == child_tid) {
-			sema_down(&child->process_sema);
-			return 1;
+	while (e != list_end(&curr->children)) {
+		struct child_info *info = list_entry(e, struct child_info, elem);
+		if (info->tid == child_tid) {
+			sema_down(&info->wait_sema);
+			return info->exit_status;
 		}
-
 		e = list_next(e);
 	}
 
@@ -264,7 +261,7 @@ process_exit (void) {
 	}
 	/* 종료 기록의 유무와 관계없이 현재 프로세스 주소 공간 정리
 	별도로 할당한 exit_info의 해제는 아직 구현x */
-	sema_up(&curr->process_sema);
+	sema_up(&curr->self_info->wait_sema);
 	process_cleanup (); 
 }
 
