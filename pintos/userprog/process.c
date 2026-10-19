@@ -19,6 +19,7 @@
 #include "threads/vaddr.h"
 #include "intrinsic.h"
 #include "threads/synch.h"
+#include "userprog/syscall.h"
 
 #ifdef VM
 #include "vm/vm.h"
@@ -90,6 +91,7 @@ initd (void *f_name) {
 #endif
 
 	process_init ();
+	fd_table_create ();
 
 	if (process_exec (f_name) < 0)
 		PANIC("Fail to launch initd\n");
