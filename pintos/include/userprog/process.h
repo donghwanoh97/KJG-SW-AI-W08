@@ -18,5 +18,15 @@ struct exit_info {
     int status;
 };
 
+struct child_info {
+    tid_t tid;
+    int exit_status;
+    bool child_exited;
+    bool parent_exited;
+    struct semaphore wait_sema;
+    struct semaphore fork_sema;
+    bool fork_success;
+    struct list_elem elem;
+};
 
 #endif /* userprog/process.h */

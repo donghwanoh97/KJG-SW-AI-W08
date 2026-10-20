@@ -294,7 +294,15 @@ thread_create (const char *name, int priority, thread_func *function, void *aux)
 	t->tf.eflags = FLAG_IF;
 
 	/* user program */
-	list_push_back(&thread_current()->children, &t->process_elem);
+	struct thread *curr = thread_current();
+	struct child_info *info = malloc(sizeof(*info));
+	info->tid = t->tid;
+	list_init(&curr->children);
+	list_push_back(&curr->children, &info->elem);
+	t->self_info = info;
+
+	sema_init(&t->self_info->wait_sema, 0);
+	sema_init(&t->self_info->fork_sema, 0);
 
 	/* run queue에 추가함. */
 	thread_unblock (t);
@@ -676,8 +684,8 @@ init_thread (struct thread *t, const char *name, int priority) {
 	list_init(&t->donations);
 
 	/* user program */
-	sema_init(&t->process_sema, 0);
 	list_init(&t->children);
+
 	t->magic = THREAD_MAGIC;
 }
 
