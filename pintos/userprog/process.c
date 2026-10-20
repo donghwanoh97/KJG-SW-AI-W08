@@ -101,10 +101,26 @@ initd (void *f_name) {
 /* 현재 프로세스를 `name`이라는 이름으로 복제함. 새 프로세스의 스레드 id를
  * 반환하며, 스레드를 생성할 수 없으면 TID_ERROR를 반환함. */
 tid_t
-process_fork (const char *name, struct intr_frame *if_ UNUSED) {
+process_fork (const char *name, struct intr_frame *if_) {
 	/* 현재 스레드를 새 스레드로 복제함. */
-	return thread_create (name,
-			PRI_DEFAULT, __do_fork, thread_current ());
+	struct thread *t = thread_current();
+	t->fork_if = if_;
+	tid_t tid = thread_create (name, PRI_DEFAULT, __do_fork, t);
+	
+	struct list_elem *e = list_begin(&t->children);
+
+	while (e != list_end(&t->children)) {
+		struct child_info *info = list_entry(e, struct child_info, elem);
+		if (info->tid == tid) {
+			sema_down(&info->fork_sema);
+			if (!info->fork_success) {
+				return TID_ERROR;
+			}
+			break;
+		}
+		e = list_next(e);		
+	}
+	return tid;
 }
 
 #ifndef VM
@@ -119,21 +135,30 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	bool writable;
 
 	/* 1. TODO: parent_page가 커널 페이지이면 즉시 반환할 것. */
+	if (is_kernel_vaddr(va)) return true;
 
 	/* 2. 부모의 페이지 맵 레벨 4(page map level 4)에서 VA를 찾음. */
-	parent_page = pml4_get_page (parent->pml4, va);
+	parent_page = pml4_get_page(parent->pml4, va);
+
 
 	/* 3. TODO: 자식을 위한 새 PAL_USER 페이지를 할당하고 결과를
 	 *    TODO: NEWPAGE에 저장할 것. */
-
+	newpage = palloc_get_page(PAL_USER);
+	if(newpage == NULL) return false;
+	
 	/* 4. TODO: 부모의 페이지를 새 페이지로 복제하고,
 	 *    TODO: 부모의 페이지가 쓰기 가능한지 확인할 것 (그 결과에 따라
 	 *    TODO: WRITABLE을 설정). */
+	memcpy(newpage, parent_page, PGSIZE);
+
+	writable = is_writable(pte);
 
 	/* 5. 새 페이지를 WRITABLE 권한으로 자식의 페이지 테이블의
 	 *    주소 VA에 추가함. */
 	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
 		/* 6. TODO: 페이지 삽입에 실패하면 오류 처리를 할 것. */
+		palloc_free_page(newpage);
+		return false;
 	}
 	return true;
 }
@@ -148,7 +173,7 @@ __do_fork (void *aux) {
 	struct thread *parent = (struct thread *) aux;
 	struct thread *current = thread_current ();
 	/* TODO: 어떻게든 parent_if를 넘겨줄 것. (즉, process_fork()의 if_) */
-	struct intr_frame *parent_if;
+	struct intr_frame *parent_if = parent->fork_if;
 	bool succ = true;
 
 	/* 1. CPU 컨텍스트를 로컬 스택으로 읽어 옴. */
@@ -174,13 +199,28 @@ __do_fork (void *aux) {
 	 * TODO:       `file_duplicate`를 사용할 것. 이 함수가 부모의 리소스를
 	 * TODO:       성공적으로 복제하기 전까지는 부모가 fork()에서 반환하면
 	 * TODO:       안 된다는 점에 주의할 것. */
+	fd_table_create();
+	for (int i = 2; i < 512; i++) { // todo-fd테이블 사이즈 조절
+		if(!parent->fd_table[i]) continue;
+
+		struct file *f = file_duplicate(parent->fd_table[i]);
+		if(f == NULL) { goto error; }
+		current->fd_table[i] = f;
+	}
+	
 
 	process_init ();
 
 	/* 마지막으로 새로 생성된 프로세스로 전환함. */
-	if (succ)
+	if (succ) {
+		current->self_info->fork_success = true;
+		sema_up(&current->self_info->fork_sema);
+		if_.R.rax = 0;
 		do_iret (&if_);
+	}
 error:
+	current->self_info->fork_success = false;
+	sema_up(&current->self_info->fork_sema);
 	thread_exit ();
 }
 
@@ -255,18 +295,23 @@ process_wait (tid_t child_tid) {
 void
 process_exit (void) {
 	struct thread *curr = thread_current ();
-	/* TODO: 여기에 코드를 작성할 것.
-	 * TODO: 프로세스 종료 메시지를 구현할 것 (project2/process_termination.html
-	 * TODO: 참고).
-	 * TODO: 프로세스 리소스 정리(cleanup)도 여기서 구현하기를 권장함. */
-	/* 현재 종료 기록은 SYS_EXIT 처리 중에만 생성
-	* 커널 스레드 종료나 예외 종료 등에서는 기록이 없을 수 있으므로
-	* 기록이 존재할 때만 종료 상태를 읽고 출력*/
-	if (curr->exit_info != NULL) {	
-		printf("%s: exit(%d)\n", curr->name, curr->exit_info->status);
-	}
-	/* 종료 기록의 유무와 관계없이 현재 프로세스 주소 공간 정리
-	별도로 할당한 exit_info의 해제는 아직 구현x */
+	bool user_process = curr->pml4 != NULL;
+	int status = -1;
+
+	if (curr->exit_info != NULL)
+		status = curr->exit_info->status;
+	else if (curr->self_info != NULL)
+		status = curr->self_info->exit_status;
+
+	/* 메시지는 이곳에서만 출력하며 커널 스레드에는 출력하지 않음. */
+	if (user_process)
+		printf ("%s: exit(%d)\n", curr->name, status);
+	free (curr->exit_info);
+	curr->exit_info = NULL;
+
+	/* 부모가 wait에서 깨어나기 전에 열린 파일과 주소 공간을 정리함. */
+	fd_table_close_all ();
+	process_cleanup ();
 
 	/* 부모 프로세스로서의 마무리 */
 	if (!list_empty(&curr->children)) {
@@ -293,17 +338,22 @@ process_exit (void) {
 
 	/* 자식 프로세스로서의 마무리 */
 	if (curr->self_info != NULL) {
-		// 부모가 이미 종료된 경우
-		if (curr->self_info->parent_exited) {
-			free(curr->self_info);
-			curr->self_info = NULL;
-		} else { // 부모가 살아 있는 경우
-			curr->self_info->child_exited = true;
-			sema_up(&curr->self_info->wait_sema);
-		}
+		struct child_info *info = curr->self_info;
+		curr->self_info = NULL;
+
+		/* 부모 종료와 상태 게시가 엇갈리지 않도록 함께 보호함. */
+		enum intr_level old_level = intr_disable ();
+		bool parent_exited = info->parent_exited;
+		info->exit_status = status;
+		info->child_exited = true;
+		if (!parent_exited)
+			sema_up (&info->wait_sema);
+		/* sema_up 이후 부모가 info를 해제할 수 있으므로 다시 접근하지 않음. */
+		intr_set_level (old_level);
+
+		if (parent_exited)
+			free (info);
 	}
-	
-	process_cleanup ();
 }
 
 /* 현재 프로세스의 리소스를 해제함. */

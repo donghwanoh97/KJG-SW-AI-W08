@@ -15,7 +15,7 @@
 #include "threads/palloc.h"
 #include "threads/vaddr.h"
 #include "devices/input.h"
-
+#include "threads/init.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
@@ -36,7 +36,7 @@ void check_address (const void *addr);
 #define MSR_LSTAR 0xc0000082        /* 롱 모드(Long mode) SYSCALL 대상 */
 #define MSR_SYSCALL_MASK 0xc0000084 /* eflags용 마스크 */
 
-#define FD_MAX (PGSIZE / sizeof(struct file *))	 /* 페이지 한 장 = 512칸 */
+#define FD_MAX (PGSIZE / sizeof(struct file *))	 /* 페이지 한 장 = 512칸 */ 
 #define IO_CHUNK 512                /* read/write가 커널 버퍼를 거치는 단위 (디스크 섹터 크기).
                                        프로젝트 2에는 필수 아님. 프로젝트 3에서 fault 처리(lazy load, mmap write-back)가
                                        filesys_lock을 잡는다면, 락을 쥔 채 유저 메모리를 건드릴 때 같은 락을 다시 잡아 패닉이 남.
@@ -57,6 +57,20 @@ syscall_init (void) {
 	 * 처리하면 안 됨. 따라서 FLAG_FL을 마스크함. */
 	write_msr(MSR_SYSCALL_MASK,
 			FLAG_IF | FLAG_TF | FLAG_DF | FLAG_IOPL | FLAG_AC | FLAG_NT);
+}
+
+void sys_exit (int status) {
+	struct thread *cur = thread_current ();
+
+	/* 종료 기록 할당에 실패해도 부모에게 전달할 상태는 보존함. */
+	if (cur->self_info != NULL)
+		cur->self_info->exit_status = status;
+	if (cur->exit_info == NULL)
+		cur->exit_info = malloc (sizeof *cur->exit_info);
+	if (cur->exit_info != NULL)
+		cur->exit_info->status = status;
+
+	thread_exit ();
 }
 
 /* 임시로 주소 확인 */
@@ -121,7 +135,7 @@ static bool copy_name(char *kdst, const char *usrc, size_t max) {
  *
  * @note 할당에 실패하면 fd_table은 NULL로 남고, 이후 fd_add()가 -1을 반환함.
  */
-void fd_table_create(void) {
+void fd_table_create(void) {// todo-fd테이블 사이즈 조절
 	thread_current()->fd_table = palloc_get_page(PAL_ZERO);
 }
 
@@ -206,6 +220,8 @@ void fd_table_close_all(void) {
 	cur->fd_table = NULL;
 }
 
+
+
 /* 시스템 콜의 메인 인터페이스 */
 void
 syscall_handler (struct intr_frame *f UNUSED) {
@@ -213,6 +229,7 @@ syscall_handler (struct intr_frame *f UNUSED) {
 	switch (f->R.rax)
 	{
 		case SYS_HALT:
+			power_off();
 			break;
 		case SYS_EXIT: {		/* exit(status) 첫 인자는 rdi로 전달 */
 			int status = (int)f->R.rdi;
@@ -230,8 +247,11 @@ syscall_handler (struct intr_frame *f UNUSED) {
 			thread_exit();		/* 내부에서 process_exit() 호출해 자원 정리하고 현재 스레드 종료 */
 		}
 		case SYS_FORK:
+			check_address(f->R.rdi);
+			f->R.rax = process_fork(f->R.rdi, f);
 			break;
 		case SYS_EXEC:
+			sys_exit ((int) f->R.rdi);
 			break;
 		case SYS_WAIT:
 			f->R.rax = process_wait(f->R.rdi);
