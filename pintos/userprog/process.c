@@ -240,16 +240,16 @@ process_exec (void *f_name) {
 	_if.eflags = FLAG_IF | FLAG_MBS;
 
 	/* 먼저 현재 컨텍스트를 제거함 */
-	process_cleanup ();
+	process_cleanup();
 
 	/* 그런 다음 바이너리를 로드함 */
-	success = load (file_name, &_if);
+	success = load(file_name, &_if);
 
 	/* 로드에 실패하면 종료함. */
 	palloc_free_page (file_name);
 	if (!success)
 		return -1;
-
+	
 	/* 전환된 프로세스를 시작함. */
 	do_iret (&_if);
 	NOT_REACHED ();

@@ -247,11 +247,18 @@ syscall_handler (struct intr_frame *f UNUSED) {
 			thread_exit();		/* 내부에서 process_exit() 호출해 자원 정리하고 현재 스레드 종료 */
 		}
 		case SYS_FORK:
-			check_address(f->R.rdi);
 			f->R.rax = process_fork(f->R.rdi, f);
 			break;
 		case SYS_EXEC:
-			sys_exit ((int) f->R.rdi);
+			check_address(f->R.rdi);	
+			size_t len = strlen((char *)f->R.rdi) + 1;
+			char *k = palloc_get_page(len);
+			if (k == NULL) {
+				sys_exit(-1);
+			}
+			strlcpy(k, f->R.rdi, len);
+			
+			f->R.rax = process_exec(k);
 			break;
 		case SYS_WAIT:
 			f->R.rax = process_wait(f->R.rdi);
