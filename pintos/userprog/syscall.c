@@ -1,5 +1,6 @@
 #include "userprog/syscall.h"
 #include <stdio.h>
+#include <string.h>
 #include <syscall-nr.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
@@ -36,6 +37,12 @@ void check_address (const void *addr);
 #define MSR_SYSCALL_MASK 0xc0000084 /* eflags용 마스크 */
 
 #define FD_MAX (PGSIZE / sizeof(struct file *))	 /* 페이지 한 장 = 512칸 */
+#define IO_CHUNK 512                /* read/write가 커널 버퍼를 거치는 단위 (디스크 섹터 크기).
+                                       프로젝트 2에는 필수 아님. 프로젝트 3에서 fault 처리(lazy load, mmap write-back)가
+                                       filesys_lock을 잡는다면, 락을 쥔 채 유저 메모리를 건드릴 때 같은 락을 다시 잡아 패닉이 남.
+                                       그래서 락 안에서는 커널 버퍼만 만지는 구조로 미리 만들어 둠.
+                                       fault 경로가 락을 전혀 안 잡기로 정해지면 이 청킹은 직접 읽기/쓰기로 되돌려도 됨. */
+#define NAME_BUF 128                /* 파일 이름을 커널로 복사해 두는 버퍼 크기 */
 struct lock filesys_lock;           /* 전역 파일 시스템 락 */
 
 void
@@ -52,17 +59,59 @@ syscall_init (void) {
 			FLAG_IF | FLAG_TF | FLAG_DF | FLAG_IOPL | FLAG_AC | FLAG_NT);
 }
 
-/*
-@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-fd_table 빨간줄 뜨는거 정상입니다.
-@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-*/
-
 /* 임시로 주소 확인 */
 void check_address(const void *addr) {
 	if (addr == NULL || !is_user_vaddr(addr) || pml4_get_page(thread_current()->pml4, addr) == NULL) {
 		thread_exit(); // 임시
 	}
+}
+
+/**
+ * @brief 유저 버퍼 [buf, buf + size)가 걸친 모든 페이지를 검사함
+ *
+ * @note 첫 페이지는 check_address(buf)가, 그 뒤 페이지는 각 페이지의 시작 주소로 검사함.
+ * @note 
+ * 임시: 포인터 검증 함수가 나오면 그 호출로 바꿀 것.
+ * check_address()가 pml4_get_page()를 쓰므로 프로젝트 3의 lazy 페이지에는 맞지 않음.
+ */
+static void check_buffer(const void *buf, size_t size) {
+	check_address(buf);
+	if (size == 0) {
+		return;
+	}
+	const char *end = (const char *)buf + size - 1;
+	for (const char *p = (const char *)pg_round_down(buf) + PGSIZE; p <= end; p += PGSIZE) {
+		check_address(p);
+	}
+}
+
+/**
+ * @brief 유저 문자열을 커널 버퍼로 복사함
+ *
+ * @param kdst 복사해 둘 커널 버퍼
+ * @param usrc 유저가 넘긴 문자열
+ * @param max kdst 크기 (NUL 포함)
+ * @return NUL까지 max 안에 복사했으면 true, 그보다 길면 false
+ *
+ * @note 
+ * 락을 잡기 전에 불러야 함. 프로젝트 2의 page_fault()는 filesys_lock을 안 잡아서 지금은 문제없음.
+ * 프로젝트 3에서 fault 처리(lazy load, mmap)가 이 락을 잡는다면, 락을 쥔 채 유저 메모리를 읽다가 fault가 날 때
+ * 같은 락을 다시 잡으려 해서 패닉이 남(락은 재귀 불가). 그때를 대비한 설계임.
+ * @note 
+ * 첫 페이지는 호출한 쪽의 check_address()가 검사하고, 여기서는 새 페이지에 들어설 때마다 검사함.
+ * 임시: 문자열 검증 함수가 나오면 바꿀 것.
+ */
+static bool copy_name(char *kdst, const char *usrc, size_t max) {
+	for (size_t i = 0; i < max; i++) {
+		if (i > 0 && pg_ofs(usrc + i) == 0) {
+			check_address(usrc + i);
+		}
+		kdst[i] = usrc[i];
+		if (kdst[i] == '\0') {
+			return true;
+		}
+	}
+	return false;
 }
 
 /**
@@ -192,8 +241,14 @@ syscall_handler (struct intr_frame *f UNUSED) {
 
 			check_address(create_file_name);
 
+			char kname[NAME_BUF];
+			if (!copy_name(kname, create_file_name, sizeof kname)) {	// 너무 긴 이름은 실패
+				f->R.rax = false;
+				break;
+			}
+
 			lock_acquire(&filesys_lock);
-			f->R.rax = filesys_create(create_file_name, initial_size);
+			f->R.rax = filesys_create(kname, initial_size);
 			lock_release(&filesys_lock);
 
 			break;
@@ -203,8 +258,14 @@ syscall_handler (struct intr_frame *f UNUSED) {
 
 			check_address(remove_file_name);
 
+			char kname[NAME_BUF];
+			if (!copy_name(kname, remove_file_name, sizeof kname)) {
+				f->R.rax = false;
+				break;
+			}
+
 			lock_acquire(&filesys_lock);
-			f->R.rax = filesys_remove(remove_file_name);
+			f->R.rax = filesys_remove(kname);
 			lock_release(&filesys_lock);
 
 			break;
@@ -214,8 +275,14 @@ syscall_handler (struct intr_frame *f UNUSED) {
 
 			check_address(open_file_name);
 
+			char kname[NAME_BUF];
+			if (!copy_name(kname, open_file_name, sizeof kname)) {
+				f->R.rax = -1;
+				break;
+			}
+
 			lock_acquire(&filesys_lock);
-			struct file *file = filesys_open(open_file_name);
+			struct file *file = filesys_open(kname);
 			lock_release(&filesys_lock);
 
 			if (file == NULL) {	// 없는 파일이거나 빈 이름이면 실패(-1)
@@ -234,7 +301,6 @@ syscall_handler (struct intr_frame *f UNUSED) {
 			break;
 		}
 		case SYS_FILESIZE: {
-			int fd = f->R.rdi;
 			struct file *file = fd_get(fd); // 실제 파일 조회는 이후 open 구현 후 fd 관리 코드와 연결
 
 			if (file == NULL) {	// fd에 연결된 파일 없으면 실패(-1) 반환
@@ -242,24 +308,18 @@ syscall_handler (struct intr_frame *f UNUSED) {
 				break;
 			}
 
+			// 지금은 길이가 안 바뀌어 락 없이도 안전하지만, 락 규칙을 예외 없이 지키고 파일 확장(프로젝트 4)에 대비해 잡음
 			lock_acquire(&filesys_lock);
-			f->R.rax = file_length(file); // 파일 크기 조회해서 리턴
+			f->R.rax = file_length(file);
 			lock_release(&filesys_lock);
 
 			break;
 		}
 		case SYS_READ: {
-			/*
-			int
-			read (int fd, void *buffer, unsigned size) {
-				return syscall3 (SYS_READ, fd, buffer, size);
-			}
-			rax rdi rsi rdx
-			*/
 			void * buffer = (void *)f->R.rsi;
 			unsigned size = (unsigned)f->R.rdx;
 
-			check_address(buffer);
+			check_buffer(buffer, size);
 
 			if (fd == 0) {
 				uint8_t *buf = buffer;
@@ -278,25 +338,36 @@ syscall_handler (struct intr_frame *f UNUSED) {
 					break;
 				}
 
-				lock_acquire(&filesys_lock);
-				f->R.rax = file_read(fd_file, buffer, size); // 실제로 읽은 바이트 수 반환
-				lock_release(&filesys_lock);
+				// 락 안에서는 커널 버퍼에만 읽고, 유저 버퍼로의 복사는 락 밖에서 함
+				// 단점: 청크마다 락을 다시 잡고, 시작 위치가 섹터 경계가 아니면 경계 섹터를 두 번 읽음
+				char kbuf[IO_CHUNK];
+				unsigned done = 0;
+				while (done < size) {
+					unsigned n = size - done < sizeof kbuf ? size - done : sizeof kbuf;
+
+					lock_acquire(&filesys_lock);
+					int got = file_read(fd_file, kbuf, n);
+					lock_release(&filesys_lock);
+
+					if (got <= 0) {
+						break;
+					}
+					memcpy((char *)buffer + done, kbuf, got);
+					done += got;
+					if (got < (int)n) {	// 파일 끝에서 짧게 읽힘
+						break;
+					}
+				}
+				f->R.rax = done; // 실제로 읽은 바이트 수 반환
 			}
 
 			break;
 		}
 		case SYS_WRITE: {
-			/*
-			int
-			write (int fd, const void *buffer, unsigned size) {
-				return syscall3 (SYS_WRITE, fd, buffer, size);
-			}
-			rax rdi rsi rdx
-			*/
 			const void *buffer = (const void *)f->R.rsi;
 			unsigned size = (unsigned)f->R.rdx;
 
-			check_address(buffer);
+			check_buffer(buffer, size);
 
 			if (fd == 1) {
 				putbuf(buffer, size);
@@ -308,24 +379,31 @@ syscall_handler (struct intr_frame *f UNUSED) {
 					f->R.rax = -1;
 					break;
 				}
-				lock_acquire(&filesys_lock);
-				f->R.rax = file_write(fd_file, buffer, size); // 실제로 쓴 바이트 수 반환
-				lock_release(&filesys_lock);
+				// 유저 버퍼는 락 밖에서 커널 버퍼로 복사해 두고, 락 안에서는 커널 버퍼만 씀
+				char kbuf[IO_CHUNK];
+				unsigned done = 0;
+				while (done < size) {
+					unsigned n = size - done < sizeof kbuf ? size - done : sizeof kbuf;
+					memcpy(kbuf, (const char *)buffer + done, n);
+
+					lock_acquire(&filesys_lock);
+					int put = file_write(fd_file, kbuf, n);
+					lock_release(&filesys_lock);
+
+					done += put;
+					if (put < (int)n) {	// 파일 끝이거나 쓰기가 막혀 더 못 씀
+						break;
+					}
+				}
+				f->R.rax = done; // 실제로 쓴 바이트 수 반환
 			}
 			break;
 		}
 		case SYS_SEEK: {
-			/*
-			void
-			seek (int fd, unsigned position) {
-				syscall2 (SYS_SEEK, fd, position);
-			}
-			rax rdi rsi
-			*/
 			unsigned position = (unsigned)f->R.rsi;
 			struct file *file = fd_get(fd);
 
-			if (file == NULL) {	// 잘못된 fd면 아무것도 안 함 (반환값 없음)
+			if (file == NULL) {	// 잘못된 fd면 아무것도 안 함
 				break;
 			}
 
@@ -336,7 +414,6 @@ syscall_handler (struct intr_frame *f UNUSED) {
 			break;
 		}
 		case SYS_TELL: {
-			int fd = f->R.rdi;
 			struct file *file = fd_get(fd);
 
 			if (file == NULL) {
