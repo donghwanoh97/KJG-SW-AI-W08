@@ -233,16 +233,22 @@ process_wait (tid_t child_tid) {
 	struct thread *curr = thread_current();
 	struct list_elem *e = list_begin(&curr->children);
 	
+	/* chilredn 리스트를 순회하며 대상 child_info를 검색 */
 	while (e != list_end(&curr->children)) {
 		struct child_info *info = list_entry(e, struct child_info, elem);
 		if (info->tid == child_tid) {
 			sema_down(&info->wait_sema);
-			return info->exit_status;
+			
+			/* 자식이 종료된 이후에 실행되는 코드 */
+			int exit_status = info->exit_status;
+			list_remove(&info->elem); // 이미 종료된 pid에 대한 wait 방지
+			free(info);
+			return exit_status; // todo: 커널에 의해 죽었을 때 exit(-1) 처리 확인 필요
 		}
 		e = list_next(e);
 	}
 
-	return -1;
+	return -1; // 직계자식이 아닌 경우
 }
 
 /* 프로세스를 종료함. 이 함수는 thread_exit()가 호출함. */
@@ -261,8 +267,43 @@ process_exit (void) {
 	}
 	/* 종료 기록의 유무와 관계없이 현재 프로세스 주소 공간 정리
 	별도로 할당한 exit_info의 해제는 아직 구현x */
-	sema_up(&curr->self_info->wait_sema);
-	process_cleanup (); 
+
+	/* 부모 프로세스로서의 마무리 */
+	if (!list_empty(&curr->children)) {
+		// children 순회
+		struct list_elem *e = list_begin(&curr->children);
+		while (e != list_end(&curr->children)) {
+			struct child_info *info = list_entry(e, struct child_info, elem);
+			bool should_free;
+
+			enum intr_level old_level = intr_disable();
+			should_free = info->child_exited; // 자식이 이미 종료한 경우 1, 자식이 아직 종료되지 않은 경우 0
+
+			if (!should_free) {
+				info->parent_exited = true;
+			}
+			e = list_remove(e); // children에서 제거한 뒤 다음 노트 탐색
+			intr_set_level(old_level);
+
+			if (should_free) {
+				free(info);
+			}
+		}
+	}
+
+	/* 자식 프로세스로서의 마무리 */
+	if (curr->self_info != NULL) {
+		// 부모가 이미 종료된 경우
+		if (curr->self_info->parent_exited) {
+			free(curr->self_info);
+			curr->self_info = NULL;
+		} else { // 부모가 살아 있는 경우
+			curr->self_info->child_exited = true;
+			sema_up(&curr->self_info->wait_sema);
+		}
+	}
+	
+	process_cleanup ();
 }
 
 /* 현재 프로세스의 리소스를 해제함. */

@@ -296,13 +296,17 @@ thread_create (const char *name, int priority, thread_func *function, void *aux)
 	/* user program */
 	struct thread *curr = thread_current();
 	struct child_info *info = malloc(sizeof(*info));
-	info->tid = t->tid;
-	list_init(&curr->children);
-	list_push_back(&curr->children, &info->elem);
-	t->self_info = info;
 
-	sema_init(&t->self_info->wait_sema, 0);
-	sema_init(&t->self_info->fork_sema, 0);
+	info->tid = t->tid;
+	info->exit_status = -1;
+	info->child_exited = false;
+	info->parent_exited = false;
+	info->fork_success = false;
+	sema_init(&info->wait_sema, 0);
+	sema_init(&info->fork_sema, 0);
+
+	t->self_info = info;
+	list_push_back(&curr->children, &info->elem);
 
 	/* run queue에 추가함. */
 	thread_unblock (t);
