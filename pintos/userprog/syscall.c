@@ -185,6 +185,7 @@ syscall_handler (struct intr_frame *f UNUSED) {
 		case SYS_EXEC:
 			break;
 		case SYS_WAIT:
+			f->R.rax = process_wait(f->R.rdi);
 			break;
 		case SYS_CREATE: {
 			const char *create_file_name = (const char *)f->R.rdi;
