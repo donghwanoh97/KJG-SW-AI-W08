@@ -14,5 +14,5 @@ void fd_table_create (void);
 int fd_add (struct file *file);
 void fd_close (int fd);
 void fd_table_close_all (void);
-
+void sys_exit (int status);
 #endif /* userprog/syscall.h */

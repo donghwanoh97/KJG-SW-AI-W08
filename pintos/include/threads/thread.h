@@ -118,6 +118,7 @@ struct thread {
 	/* user program */	
 	struct list children; // 부모 -> 자식 연결용 리스트
 	struct child_info* self_info; // 자식 -> 부모 연결용 포인터
+	struct intr_frame* fork_if; 
 
 #ifdef USERPROG
 	/* userprog/process.c가 소유함. */
