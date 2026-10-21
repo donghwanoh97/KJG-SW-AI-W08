@@ -200,7 +200,7 @@ __do_fork (void *aux) {
 	 * TODO:       성공적으로 복제하기 전까지는 부모가 fork()에서 반환하면
 	 * TODO:       안 된다는 점에 주의할 것. */
 	fd_table_create();
-	for (int i = 2; i < 512; i++) { // todo-fd테이블 사이즈 조절
+	for (int i = 2; i < FD_MAX; i++) {
 		if(!parent->fd_table[i]) continue;
 
 		struct file *f = file_duplicate(parent->fd_table[i]);
@@ -243,6 +243,7 @@ process_exec (void *f_name) {
 	process_cleanup();
 
 	/* 그런 다음 바이너리를 로드함 */
+
 	success = load(file_name, &_if);
 
 	/* 로드에 실패하면 종료함. */
@@ -310,7 +311,7 @@ process_exit (void) {
 	curr->exit_info = NULL;
 
 	/* 부모가 wait에서 깨어나기 전에 열린 파일과 주소 공간을 정리함. */
-	fd_table_close_all ();
+	fd_table_close_all();
 	process_cleanup ();
 
 	/* 부모 프로세스로서의 마무리 */
@@ -354,6 +355,8 @@ process_exit (void) {
 		if (parent_exited)
 			free (info);
 	}
+
+	file_close(curr->using_file);
 }
 
 /* 현재 프로세스의 리소스를 해제함. */
@@ -490,6 +493,8 @@ load (const char *file_name, struct intr_frame *if_) {
 		printf ("load: %s: open failed\n", argv[0]);
 		goto done;
 	}
+	file_deny_write(file);
+	t->using_file = file;
 
 	/* 실행 파일 헤더를 읽고 검증함. */
 	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
@@ -590,7 +595,6 @@ load (const char *file_name, struct intr_frame *if_) {
 
 done:
 	/* 로드가 성공하든 실패하든 여기에 도달함. */
-	file_close (file);
 	return success;
 }
 
