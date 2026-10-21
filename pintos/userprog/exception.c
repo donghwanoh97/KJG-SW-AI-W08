@@ -142,7 +142,9 @@ page_fault (struct intr_frame *f) {
 
 	/* 페이지 폴트 횟수를 셈. */
 	page_fault_cnt++;
-
+	if(user){
+		sys_exit(-1);
+	}
 	/* 진짜 폴트라면 정보를 출력하고 종료함. */
 	printf ("Page fault at %p: %s error %s page in %s context.\n",
 			fault_addr,

@@ -258,6 +258,7 @@ syscall_handler (struct intr_frame *f UNUSED) {
 			strlcpy(k, f->R.rdi, len);
 			
 			f->R.rax = process_exec(k);
+			sys_exit(-1);
 			break;
 		case SYS_WAIT:
 			f->R.rax = process_wait(f->R.rdi);
