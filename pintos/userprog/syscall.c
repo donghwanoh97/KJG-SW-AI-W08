@@ -36,7 +36,6 @@ void check_address (const void *addr);
 #define MSR_LSTAR 0xc0000082        /* 롱 모드(Long mode) SYSCALL 대상 */
 #define MSR_SYSCALL_MASK 0xc0000084 /* eflags용 마스크 */
 
-#define FD_MAX (PGSIZE / sizeof(struct file *))	 /* 페이지 한 장 = 512칸 */ 
 #define IO_CHUNK 512                /* read/write가 커널 버퍼를 거치는 단위 (디스크 섹터 크기).
                                        프로젝트 2에는 필수 아님. 프로젝트 3에서 fault 처리(lazy load, mmap write-back)가
                                        filesys_lock을 잡는다면, 락을 쥔 채 유저 메모리를 건드릴 때 같은 락을 다시 잡아 패닉이 남.
@@ -76,7 +75,7 @@ void sys_exit (int status) {
 /* 임시로 주소 확인 */
 void check_address(const void *addr) {
 	if (addr == NULL || !is_user_vaddr(addr) || pml4_get_page(thread_current()->pml4, addr) == NULL) {
-		thread_exit(); // 임시
+		sys_exit(-1);
 	}
 }
 
@@ -131,12 +130,12 @@ static bool copy_name(char *kdst, const char *usrc, size_t max) {
 /**
  * @brief 현재 스레드의 fd 테이블을 할당함
  *
- * @details palloc_get_page(PAL_ZERO)로 페이지 한 장을 받아 FD_MAX칸 전부 NULL인 상태로 시작함.
+ * @details calloc으로 FD_MAX칸(64칸 = 512바이트)을 받아 전부 NULL인 상태로 시작함.
  *
  * @note 할당에 실패하면 fd_table은 NULL로 남고, 이후 fd_add()가 -1을 반환함.
  */
-void fd_table_create(void) {// todo-fd테이블 사이즈 조절
-	thread_current()->fd_table = palloc_get_page(PAL_ZERO);
+void fd_table_create(void) {
+	thread_current()->fd_table = calloc(FD_MAX, sizeof(struct file *));
 }
 
 /**
@@ -216,7 +215,7 @@ void fd_table_close_all(void) {
 	for (int fd = 2; fd < (int)FD_MAX; fd++) { // 0,1은 예약이라고 가정
 		fd_close(fd);
 	}
-	palloc_free_page(cur->fd_table);
+	free(cur->fd_table);
 	cur->fd_table = NULL;
 }
 
@@ -400,7 +399,7 @@ syscall_handler (struct intr_frame *f UNUSED) {
 			if (fd == 1) {
 				putbuf(buffer, size);
 				f->R.rax = size;
-			}
+			} 
 			else {
 				struct file* fd_file =fd_get(fd);
 				if (fd_file == NULL) {	// fd 0이나 잘못된 fd면 실패(-1), exit 안 함

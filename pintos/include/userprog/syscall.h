@@ -7,6 +7,8 @@ struct file;
 
 extern struct lock filesys_lock;
 
+#define FD_MAX 64	/* fd 테이블 칸 수 */
+
 void syscall_init (void);
 
 /* fd 테이블 */
