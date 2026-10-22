@@ -19,6 +19,7 @@
 #include "threads/vaddr.h"
 #include "intrinsic.h"
 #include "threads/synch.h"
+#include "threads/malloc.h"
 #include "userprog/syscall.h"
 
 #ifdef VM
@@ -32,13 +33,49 @@
 
 static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
-static void initd (void *f_name);
+static void initd (void *aux);
 static void __do_fork (void *);
 
 /* initd 및 다른 프로세스를 위한 일반 프로세스 초기화 함수. */
 static void
 process_init (void) {
 	struct thread *current = thread_current ();
+}
+
+/**
+ * @brief 새 자식 기록을 만들어 현재 스레드의 children에 넣음
+ *
+ * @details
+ * 기록이 필요한 건 wait 대상이 되는 유저 프로세스(initd, fork 자식)뿐이라,
+ * thread_create()가 아니라 그 둘을 만드는 process_create_initd()와 process_fork()에서만 부름.
+ * thread_create() 전에 children에 넣어 두므로, 자식이 부모의 process_fork()가
+ * 반환되기 전에 끝나도 기록은 부모 쪽에 남아 있음. tid는 thread_create()가 끝난 뒤
+ * 호출한 쪽이 채움. 그 사이에 이 기록을 tid로 찾는 건 부모 자신뿐이라 안전함.
+ *
+ * @return 새 기록. 할당에 실패하면 NULL (children에도 넣지 않음)
+ */
+static struct child_info *
+child_info_create (void) {
+	struct child_info *info = malloc (sizeof *info);
+	if (info == NULL)
+		return NULL;
+
+	info->tid = TID_ERROR;
+	info->exit_status = -1;
+	info->child_exited = false;
+	info->parent_exited = false;
+	info->fork_success = false;
+	sema_init (&info->wait_sema, 0);
+	sema_init (&info->fork_sema, 0);
+	list_push_back (&thread_current ()->children, &info->elem);
+	return info;
+}
+
+/* 아직 자식에게 넘기지 못한 기록을 children에서 빼고 해제함. */
+static void
+child_info_discard (struct child_info *info) {
+	list_remove (&info->elem);
+	free (info);
 }
 
 /**
@@ -87,13 +124,28 @@ process_create_initd (const char *file_name) {
 		palloc_free_page(fn_copy);
 		return TID_ERROR;
 	}
-	
+
+	/* main 스레드가 process_wait(initd)로 기다릴 기록과, initd에게 넘길 인자 묶음 */
+	struct child_info *info = child_info_create ();
+	struct initd_args *args = malloc (sizeof *args);
+	if (info == NULL || args == NULL)
+		goto fail;
+	args->fn_copy = fn_copy;
+	args->info = info;
 
 	/* FILE_NAME을 실행할 새 스레드를 생성함. */
-	tid = thread_create (program_name, PRI_DEFAULT, initd, fn_copy);
+	tid = thread_create (program_name, PRI_DEFAULT, initd, args);
 	if (tid == TID_ERROR)
-		palloc_free_page (fn_copy);
+		goto fail;
+	info->tid = tid;
 	return tid;
+
+fail:
+	if (info != NULL)
+		child_info_discard (info);
+	free (args);
+	palloc_free_page (fn_copy);
+	return TID_ERROR;
 }
 
 /**
@@ -104,12 +156,19 @@ process_create_initd (const char *file_name) {
  * 다른 유저 프로세스는 모두 fork로 생기고 __do_fork()에서 테이블을 만들기 때문에,
  * fd_table_create() 호출 지점은 이곳과 __do_fork() 두 곳뿐임.
  *
- * @param[in] f_name process_create_initd()가 만든 명령줄 페이지 (소유권 넘겨받음)
+ * @param[in] aux process_create_initd()가 만든 struct initd_args (소유권 넘겨받아 여기서 free)
  *
  * @note 반환하지 않음. 로드에 실패하면 실행할 유저 프로그램이 없으므로 PANIC
  */
 static void
-initd (void *f_name) {
+initd (void *aux) {
+	struct initd_args *args = aux;
+	char *f_name = args->fn_copy;
+
+	/* 종료 경로 어디서든 부모에게 상태를 남길 수 있도록 가장 먼저 연결함 */
+	thread_current ()->self_info = args->info;
+	free (args);
+
 #ifdef VM
 	supplemental_page_table_init (&thread_current ()->spt);
 #endif
@@ -128,16 +187,18 @@ initd (void *f_name) {
  * @details
  * 자식이 복제할 유저 컨텍스트(유저 레지스터)는 parent->tf에 없음. tf는 커널 스레드끼리
  * 전환할 때 쓰는 프레임이라 시스템 콜에 들어온 시점의 유저 레지스터가 아니기 때문임.
- * 그래서 시스템 콜 진입 때 받은 IF_ 주소를 fork_if에 남기고, 자식 스레드에 부모 포인터를
- * aux로 넘겨 __do_fork()가 읽어 가게 함.
+ * 그래서 부모 포인터, IF_ 주소, 자식 기록을 struct fork_args에 묶어 aux로 넘기고
+ * __do_fork()가 읽어 가게 함.
  *
  * 그다음 자식의 fork_sema에서 기다림. 이유는 두 가지임.
  * - fork()의 반환값을 정하려면 자식의 복제 성공 여부(fork_success)를 알아야 함
- * - IF_는 부모 커널 스택에 있는 프레임이라, 부모가 먼저 유저로 돌아가면 덮어써짐.
+ * - IF_와 fork_args는 부모 커널 스택에 있어서, 부모가 먼저 유저로 돌아가면 덮어써짐.
  *   자식이 복사를 끝낼 때까지 부모를 붙잡아 둬야 주소만 넘겨도 안전함
  *
- * 자식의 child_info는 thread_create()가 children 맨 뒤에 넣어 둠. tid로 찾아서 그 기록의
- * 세마포어를 씀.
+ * 자식 기록(child_info)은 여기서 child_info_create()로 만들어 children에 넣음.
+ * 포인터를 직접 들고 있으므로 children을 tid로 다시 찾을 필요가 없음.
+ * 복제가 실패하면 그 tid는 아무도 wait할 수 없으므로, 자식의 process_exit()가 끝나기를
+ * 기다렸다가(wait_sema) 기록을 바로 회수함.
  *
  * @param[in] name 자식 스레드 이름 (유저가 넘긴 문자열)
  * @param[in] if_ 시스템 콜 진입 시점의 부모 유저 레지스터
@@ -148,23 +209,30 @@ initd (void *f_name) {
  */
 tid_t
 process_fork (const char *name, struct intr_frame *if_) {
-	/* 현재 스레드를 새 스레드로 복제함. */
-	struct thread *t = thread_current();
-	t->fork_if = if_;
-	tid_t tid = thread_create (name, PRI_DEFAULT, __do_fork, t);
-	
-	struct list_elem *e = list_begin(&t->children);
+	struct child_info *info = child_info_create ();
+	if (info == NULL)
+		return TID_ERROR;
 
-	while (e != list_end(&t->children)) {
-		struct child_info *info = list_entry(e, struct child_info, elem);
-		if (info->tid == tid) {
-			sema_down(&info->fork_sema);
-			if (!info->fork_success) {
-				return TID_ERROR;
-			}
-			break;
-		}
-		e = list_next(e);		
+	/* 현재 스레드를 새 스레드로 복제함. */
+	struct fork_args args = {
+		.parent = thread_current (),
+		.parent_if = if_,
+		.info = info,
+	};
+	tid_t tid = thread_create (name, PRI_DEFAULT, __do_fork, &args);
+	if (tid == TID_ERROR) {
+		child_info_discard (info);
+		return TID_ERROR;
+	}
+	info->tid = tid;
+
+	sema_down (&info->fork_sema);
+	if (!info->fork_success) {
+		/* 자식은 fork_sema를 올린 뒤 process_exit()에서 아직 info를 쓰는 중일 수 있음.
+		 * wait_sema가 올라오면(자식이 기록을 다 썼으면) 그때 회수함. */
+		sema_down (&info->wait_sema);
+		child_info_discard (info);
+		return TID_ERROR;
 	}
 	return tid;
 }
@@ -234,7 +302,8 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
  *
  * @details
  * 순서는 다음과 같음.
- * 1. parent->fork_if를 로컬 if_로 복사. 부모가 깨어나면 원본이 사라지므로 먼저 복사함
+ * 0. fork_args의 기록을 self_info로 연결. 실패로 끝나도 process_exit()가 부모에게 알릴 수 있게 함
+ * 1. 부모 유저 레지스터(args->parent_if)를 로컬 if_로 복사. 부모가 깨어나면 원본이 사라지므로 먼저 복사함
  * 2. 새 pml4를 만들고 활성화한 뒤 duplicate_pte()로 유저 페이지를 하나씩 복제
  * 3. fd 테이블을 새로 만들고 열린 파일마다 file_duplicate()
  *    - file_reopen()이 아니라 file_duplicate()를 쓰는 이유: 파일 위치(pos)와 deny_write까지
@@ -248,7 +317,7 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
  * 실패하면 fork_success = false로 부모를 깨운 뒤 thread_exit()함. 반쯤 복제된 자원은
  * process_exit()가 정리함(fd_table_close_all, process_cleanup).
  *
- * @param[in] aux 부모 struct thread * (process_fork()가 넘김)
+ * @param[in] aux 부모 스택의 struct fork_args * (process_fork()가 넘김)
  *
  * @note 반환하지 않음. 성공하면 유저 모드로, 실패하면 thread_exit()로 감
  * @note fork_sema를 올리기 전에 성공 여부를 써야 함. 부모는 깨어나자마자 fork_success를 읽음
@@ -257,14 +326,16 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 static void
 __do_fork (void *aux) {
 	struct intr_frame if_;
-	struct thread *parent = (struct thread *) aux;
+	struct fork_args *args = aux;	/* 부모 스택에 있음. fork_sema를 올린 뒤에는 접근 금지 */
+	struct thread *parent = args->parent;
 	struct thread *current = thread_current ();
-	/* TODO: 어떻게든 parent_if를 넘겨줄 것. (즉, process_fork()의 if_) */
-	struct intr_frame *parent_if = parent->fork_if;
 	bool succ = true;
 
+	/* 0. 종료 경로 어디서든 부모에게 상태를 남길 수 있도록 기록부터 연결함. */
+	current->self_info = args->info;
+
 	/* 1. CPU 컨텍스트를 로컬 스택으로 읽어 옴. */
-	memcpy (&if_, parent_if, sizeof (struct intr_frame));
+	memcpy (&if_, args->parent_if, sizeof (struct intr_frame));
 
 	/* 2. 페이지 테이블(PT)을 복제함 */
 	current->pml4 = pml4_create();

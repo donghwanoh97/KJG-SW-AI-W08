@@ -256,10 +256,9 @@ thread_print_stats (void) {
  * 스케줄될 수 있고, 심지어 반환되기 전에 종료될 수도 있음. 반대로, 새 스레드가
  * 스케줄되기 전까지 원래 스레드가 얼마든지 오래 실행될 수도 있음.
  *
- * 프로젝트 2: 새 스레드의 child_info를 만들어 현재 스레드의 children에 넣음.
- * unblock 전에 넣는 이유는, 새 스레드가 바로 스케줄되어 종료하거나 fork를 끝내도
- * 부모가 tid로 기록을 찾을 수 있어야 하기 때문임(process_fork(), process_wait()).
- * fork와 initd 모두 이 함수를 거치므로 기록 생성 지점을 한 곳으로 모음.
+ * 프로젝트 2의 child_info는 여기서 만들지 않음. 기록이 필요한 건 wait 대상이 되는
+ * 유저 프로세스(initd, fork 자식)뿐이라, process_create_initd()와 process_fork()가
+ * 직접 만들어 aux로 넘김. 커널 스레드(idle 등)에는 기록이 생기지 않음.
  *
  * @param[in] name 새 스레드의 이름
  * @param[in] priority 새 스레드의 초기 우선순위
@@ -297,21 +296,6 @@ thread_create (const char *name, int priority, thread_func *function, void *aux)
 	t->tf.ss = SEL_KDSEG;
 	t->tf.cs = SEL_KCSEG;
 	t->tf.eflags = FLAG_IF;
-
-	/* user program */
-	struct thread *curr = thread_current();
-	struct child_info *info = malloc(sizeof(*info));
-
-	info->tid = t->tid;
-	info->exit_status = -1;
-	info->child_exited = false;
-	info->parent_exited = false;
-	info->fork_success = false;
-	sema_init(&info->wait_sema, 0);
-	sema_init(&info->fork_sema, 0);
-
-	t->self_info = info;
-	list_push_back(&curr->children, &info->elem);
 
 	/* run queue에 추가함. */
 	thread_unblock (t);
@@ -692,8 +676,10 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->init_priority = priority;
 	list_init(&t->donations);
 
-	/* user program */
+#ifdef USERPROG
+	/* 자식 기록 리스트. 기록(child_info)은 process.c가 fork/initd 때만 만듦 */
 	list_init(&t->children);
+#endif
 
 	t->magic = THREAD_MAGIC;
 }
