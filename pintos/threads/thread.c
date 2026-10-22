@@ -256,6 +256,11 @@ thread_print_stats (void) {
  * 스케줄될 수 있고, 심지어 반환되기 전에 종료될 수도 있음. 반대로, 새 스레드가
  * 스케줄되기 전까지 원래 스레드가 얼마든지 오래 실행될 수도 있음.
  *
+ * 프로젝트 2: 새 스레드의 child_info를 만들어 현재 스레드의 children에 넣음.
+ * unblock 전에 넣는 이유는, 새 스레드가 바로 스케줄되어 종료하거나 fork를 끝내도
+ * 부모가 tid로 기록을 찾을 수 있어야 하기 때문임(process_fork(), process_wait()).
+ * fork와 initd 모두 이 함수를 거치므로 기록 생성 지점을 한 곳으로 모음.
+ *
  * @param[in] name 새 스레드의 이름
  * @param[in] priority 새 스레드의 초기 우선순위
  * @param[in] function 새 스레드가 실행할 함수 (thread_func 타입)

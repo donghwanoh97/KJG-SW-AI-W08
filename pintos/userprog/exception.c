@@ -101,16 +101,28 @@ kill (struct intr_frame *f) {
 	}
 }
 
-/* 페이지 폴트(page fault) 핸들러.  가상 메모리를 구현하려면 채워
-   넣어야 하는 뼈대 코드임.  project 2의 일부 해법에서도 이 코드를
-   수정해야 할 수 있음.
-
-   진입 시점에 폴트가 난 주소는 CR2(Control Register 2)에 있고,
-   exception.h의 PF_* 매크로에 설명된 형식의 폴트 정보는 F의
-   error_code 멤버에 있음.  여기 있는 예제 코드는 그 정보를 파싱하는
-   방법을 보여줌.  둘 모두에 대한 더 자세한 정보는 [IA32-v3a] 5.15절
-   "Exception and Interrupt Reference"의 "Interrupt 14--Page Fault
-   Exception (#PF)" 설명에서 찾을 수 있음. */
+/**
+ * @brief 페이지 폴트(#PF) 핸들러
+ *
+ * @details
+ * 폴트 주소는 CR2에, 원인(존재 안 함/권한 위반, 읽기/쓰기, 유저/커널)은
+ * f->error_code의 PF_* 비트에 있음 ([IA32-v3a] 5.15절 "Interrupt 14").
+ *
+ * 프로젝트 2에서 바꾼 점: 유저 모드에서 난 폴트는 kill() 대신 sys_exit(-1)로 끝냄.
+ * - 유저 프로그램이 잘못된 주소를 건드린 것은 커널 버그가 아니라 그 프로세스의 잘못이므로
+ *   프로세스만 끝내면 됨
+ * - kill()은 "dying due to interrupt" 메시지와 레지스터 덤프를 찍지만, 테스트는
+ *   "name: exit(-1)" 종료 메시지를 기대함. sys_exit()를 거쳐야 process_exit()가
+ *   그 메시지를 찍고 부모의 wait도 -1을 받음
+ *
+ * 커널 모드 폴트는 그대로 kill()로 가서 PANIC함. 시스템 콜은 유저 포인터를 미리
+ * 검사하므로(check_address 등) 커널이 유저 주소에서 폴트를 내는 일은 버그임.
+ *
+ * @param[in] f 폴트 당시의 인터럽트 프레임
+ *
+ * @note 인터럽트를 끈 채 들어옴(exception_init의 INTR_OFF). CR2를 읽은 뒤 다시 켬
+ * @note VM 빌드에서는 vm_try_handle_fault()가 먼저 처리를 시도함
+ */
 static void
 page_fault (struct intr_frame *f) {
 	bool not_present;  /* True: 존재하지 않는 페이지, false: 읽기 전용 페이지에 쓰기. */

@@ -44,6 +44,17 @@ void check_address (const void *addr);
 #define NAME_BUF 128                /* 파일 이름을 커널로 복사해 두는 버퍼 크기 */
 struct lock filesys_lock;           /* 전역 파일 시스템 락 */
 
+/**
+ * @brief syscall 명령어용 MSR을 설정하고 전역 filesys_lock을 초기화함
+ *
+ * @details
+ * Pintos의 파일 시스템(filesys_*, file_*)은 내부 동기화가 없으므로,
+ * 모든 파일 시스템 호출을 락 하나로 직렬화하기로 정함. 락을 여러 개로 쪼개면
+ * 락 순서 문제가 생기고 P2 범위에서는 성능 이득도 없어서 전역 락 하나만 씀.
+ * 시스템 콜이 처음 들어오기 전에 락이 준비되어 있어야 하므로 여기서 초기화함.
+ *
+ * @note threads/init.c의 main()에서 부팅 중 한 번만 호출됨
+ */
 void
 syscall_init (void) {
 	lock_init(&filesys_lock);
@@ -58,6 +69,26 @@ syscall_init (void) {
 			FLAG_IF | FLAG_TF | FLAG_DF | FLAG_IOPL | FLAG_AC | FLAG_NT);
 }
 
+/**
+ * @brief 종료 상태 STATUS를 기록하고 현재 프로세스를 종료함
+ *
+ * @details
+ * exit 시스템 콜뿐 아니라 잘못된 유저 포인터(check_address),
+ * 유저 모드 page fault(exception.c의 page_fault)도 모두 sys_exit(-1)로 들어옴.
+ * 종료 경로를 이 함수 하나로 모아서, 어떤 이유로 죽든 같은 방식으로 상태가 남게 함.
+ *
+ * 상태를 두 곳에 씀.
+ * - self_info->exit_status: 부모의 process_wait()가 읽어 갈 값
+ * - exit_info->status: process_exit()가 종료 메시지에 쓸 값
+ *
+ * exit_info는 malloc으로 받으므로 실패할 수 있음. 그래서 self_info에 먼저 써 두어,
+ * 할당이 실패해도 process_exit()가 self_info 쪽 값으로 메시지와 wait 결과를 맞추게 함.
+ *
+ * @param[in] status 부모에게 전달하고 종료 메시지에 찍을 종료 상태
+ *
+ * @note 반환하지 않음. thread_exit()가 process_exit()를 거쳐 자원을 정리함
+ * @see process_exit(), process_wait()
+ */
 void sys_exit (int status) {
 	struct thread *cur = thread_current ();
 
@@ -72,7 +103,24 @@ void sys_exit (int status) {
 	thread_exit ();
 }
 
-/* 임시로 주소 확인 */
+/**
+ * @brief 유저가 넘긴 주소 ADDR 하나가 접근 가능한 유저 페이지인지 검사함
+ *
+ * @details
+ * 세 가지를 차례로 봄.
+ * 1. NULL이 아님
+ * 2. 유저 영역 주소임(is_user_vaddr). 커널 주소를 넘겨 커널 메모리를 읽거나 쓰는 것을 막음
+ * 3. 현재 프로세스의 페이지 테이블에 실제로 매핑되어 있음(pml4_get_page)
+ *
+ * 하나라도 어기면 커널이 그 주소를 건드리기 전에 sys_exit(-1)로 프로세스를 끝냄.
+ * page fault가 난 뒤 수습하는 방식 대신 "먼저 검사하고 쓰는" 방식을 택함.
+ * 검사 위치가 시스템 콜 입구로 모여 있어서 흐름을 따라가기 쉽기 때문임.
+ *
+ * @param[in] addr 검사할 유저 가상 주소
+ *
+ * @note 이 주소가 속한 한 페이지만 봄. 여러 페이지에 걸친 버퍼는 check_buffer(),
+ *       문자열은 copy_name()을 씀
+ */
 void check_address(const void *addr) {
 	if (addr == NULL || !is_user_vaddr(addr) || pml4_get_page(thread_current()->pml4, addr) == NULL) {
 		sys_exit(-1);
@@ -82,8 +130,17 @@ void check_address(const void *addr) {
 /**
  * @brief 유저 버퍼 [buf, buf + size)가 걸친 모든 페이지를 검사함
  *
+ * @details
+ * read/write 버퍼는 시작 주소만 멀쩡하고 중간이나 끝이 매핑 안 된 페이지일 수 있음
+ * (예: 스택 끝에 걸친 버퍼). 시작 주소만 보면 커널이 memcpy하다 page fault로 죽으므로,
+ * 버퍼가 걸친 페이지마다 한 번씩 검사함. 바이트 단위가 아니라 페이지 단위로 도는 이유는
+ * 매핑 여부가 페이지 단위로 정해지기 때문임.
+ *
+ * @param[in] buf 유저 버퍼 시작 주소
+ * @param[in] size 버퍼 크기(바이트). 0이면 시작 주소만 검사함
+ *
  * @note 첫 페이지는 check_address(buf)가, 그 뒤 페이지는 각 페이지의 시작 주소로 검사함.
- * @note 
+ * @note
  * 임시: 포인터 검증 함수가 나오면 그 호출로 바꿀 것.
  * check_address()가 pml4_get_page()를 쓰므로 프로젝트 3의 lazy 페이지에는 맞지 않음.
  */
@@ -101,9 +158,16 @@ static void check_buffer(const void *buf, size_t size) {
 /**
  * @brief 유저 문자열을 커널 버퍼로 복사함
  *
- * @param kdst 복사해 둘 커널 버퍼
- * @param usrc 유저가 넘긴 문자열
- * @param max kdst 크기 (NUL 포함)
+ * @details
+ * 문자열은 길이를 미리 알 수 없어서 check_buffer()를 쓸 수 없음. 그래서 한 글자씩
+ * 복사하면서 새 페이지에 들어설 때만 check_address()로 검사함.
+ * 복사본을 커널 스택 버퍼에 두면 두 가지가 해결됨.
+ * - filesys_lock을 잡은 동안에는 유저 메모리를 건드리지 않게 됨 (아래 note)
+ * - 검사한 뒤 다른 스레드가 유저 문자열을 바꿔도 커널은 복사본만 씀
+ *
+ * @param[out] kdst 복사해 둘 커널 버퍼
+ * @param[in] usrc 유저가 넘긴 문자열
+ * @param[in] max kdst 크기 (NUL 포함)
  * @return NUL까지 max 안에 복사했으면 true, 그보다 길면 false
  *
  * @note 
@@ -130,9 +194,15 @@ static bool copy_name(char *kdst, const char *usrc, size_t max) {
 /**
  * @brief 현재 스레드의 fd 테이블을 할당함
  *
- * @details calloc으로 FD_MAX칸(64칸 = 512바이트)을 받아 전부 NULL인 상태로 시작함.
+ * @details
+ * calloc으로 FD_MAX칸(64칸 = 512바이트)을 받아 전부 NULL인 상태로 시작함.
+ * fd 번호를 그대로 배열 인덱스로 쓰는 고정 크기 배열이라 조회가 O(1)이고 구현이 단순함.
+ * 처음에는 palloc으로 4KB 페이지(512칸)를 통째로 받았지만, 칸 하나가 포인터 8바이트라
+ * 대부분이 비어 있는 낭비여서 64칸 calloc으로 줄임. 테스트가 동시에 여는 파일 수는 64칸 안에 들어옴.
  *
  * @note 할당에 실패하면 fd_table은 NULL로 남고, 이후 fd_add()가 -1을 반환함.
+ * @note 유저 프로세스가 생기는 두 곳(initd(), __do_fork())에서만 호출함.
+ *       커널 스레드는 테이블이 없음(NULL)
  */
 void fd_table_create(void) {
 	thread_current()->fd_table = calloc(FD_MAX, sizeof(struct file *));
@@ -141,10 +211,18 @@ void fd_table_create(void) {
 /**
  * @brief fd에 연결된 열린 파일을 찾음
  *
- * @param fd 유저가 넘긴 파일 디스크립터
+ * @details
+ * fd는 유저가 마음대로 넘기는 정수라 음수나 아주 큰 값이 올 수 있음.
+ * 배열 범위를 벗어난 읽기를 막으려고, fd로 테이블을 여는 곳은 모두 이 함수를 거치게 함.
+ * 0, 1은 stdin/stdout 예약 번호라 테이블에서 찾지 않고 NULL을 돌려줌.
+ * 호출하는 쪽에서 0, 1을 따로 처리함(SYS_READ, SYS_WRITE).
+ *
+ * @param[in] fd 유저가 넘긴 파일 디스크립터
  * @return 연결된 struct file *. 테이블이 없거나, fd가 2 미만·FD_MAX 이상이거나, 빈 칸이면 NULL
  *
  * @note 잘못된 fd여도 exit하지 않음. 범위 검사는 이 함수 한 곳에서만 함.
+ *       잘못된 fd는 커널 메모리를 위협하지 않는 유저의 실수라서, 프로세스를 죽이지 않고
+ *       시스템 콜이 실패값(-1)을 돌려주게 함
  */
 static struct file *fd_get(int fd) {
 	struct file **table = thread_current()->fd_table;
@@ -158,10 +236,15 @@ static struct file *fd_get(int fd) {
 /**
  * @brief 열린 파일을 fd 테이블의 빈 칸에 등록함
  *
- * @param file 등록할 열린 파일
+ * @details
+ * POSIX처럼 비어 있는 가장 작은 번호를 줌. 닫힌 번호를 다시 쓰므로 open/close를
+ * 반복해도 번호가 바닥나지 않음. 64칸뿐이라 앞에서부터 훑는 선형 탐색으로 충분함.
+ *
+ * @param[in] file 등록할 열린 파일
  * @return 배정된 fd (2번부터 비어 있는 가장 작은 번호). 테이블이 없거나 꽉 차면 -1
  *
- * @note 실패해도 file을 닫지 않음. 호출한 쪽이 닫아야 함.
+ * @note 실패해도 file을 닫지 않음. 호출한 쪽이 닫아야 함(SYS_OPEN 참고).
+ *       file을 연 쪽이 실패 처리까지 책임지게 해서 소유권을 한 곳에 둠
  */
 int fd_add(struct file *file) {
 	struct file **table = thread_current()->fd_table;
@@ -181,10 +264,15 @@ int fd_add(struct file *file) {
 /**
  * @brief fd에 연결된 파일을 닫고 칸을 비움
  *
- * @param fd 닫을 파일 디스크립터
+ * @details
+ * 칸을 먼저 NULL로 비운 뒤 파일을 닫음. 닫힌 struct file을 가리키는 칸이
+ * 테이블에 남는 순간이 없게 하려는 순서임.
  *
- * @note 잘못된 fd나 이미 닫은 fd면 아무것도 하지 않음.
- * @note file_close() 호출 부분만 filesys_lock을 잡음.
+ * @param[in] fd 닫을 파일 디스크립터
+ *
+ * @note 잘못된 fd나 이미 닫은 fd면 아무것도 하지 않음(close-twice, close-bad-fd).
+ * @note file_close() 호출 부분만 filesys_lock을 잡음. 락 구간을 짧게 둬서
+ *       다른 프로세스의 파일 시스템 호출이 오래 기다리지 않게 함
  */
 void fd_close(int fd) {
 	struct file *file = fd_get(fd);
@@ -200,11 +288,16 @@ void fd_close(int fd) {
 }
 
 /**
- * @brief 열린 파일을 모두 닫고 fd 테이블 페이지를 해제함
+ * @brief 열린 파일을 모두 닫고 fd 테이블을 해제함
  *
- * @details 프로세스 종료 시 process_exit()에서 호출함.
+ * @details
+ * 프로세스 종료 시 process_exit()에서 호출함.
+ * 유저가 close하지 않고 끝낸 파일도 여기서 닫아야 inode 참조 수가 줄어,
+ * 나중에 remove된 파일이 실제로 지워지고 메모리도 새지 않음.
+ * 칸마다 fd_close()를 다시 써서 닫는 방식(칸 비우기, 락 잡기)을 한 곳에 둠.
  *
  * @note 테이블이 없으면(커널 스레드, fork 실패) 아무것도 하지 않음.
+ * @note 해제 뒤 fd_table을 NULL로 둬서, 혹시 다시 불려도 이중 해제가 나지 않음
  */
 void fd_table_close_all(void) {
 	struct thread *cur = thread_current();
@@ -221,7 +314,27 @@ void fd_table_close_all(void) {
 
 
 
-/* 시스템 콜의 메인 인터페이스 */
+/**
+ * @brief 시스템 콜 번호에 따라 각 시스템 콜을 처리하는 디스패처
+ *
+ * @details
+ * x86-64 syscall 규약을 그대로 따름. 번호는 rax, 인자는 rdi, rsi, rdx 순서로 오고,
+ * 반환값은 f->R.rax에 써 두면 syscall_entry가 유저로 돌아갈 때 rax로 복원함.
+ * 첫 인자가 fd인 시스템 콜이 많아서 rdi를 미리 fd로 꺼내 둠.
+ *
+ * 파일 시스템 콜은 모두 같은 순서를 지킴.
+ * 1. 유저 포인터 검증 (check_address, check_buffer)
+ * 2. 유저 데이터를 커널 버퍼로 복사 (copy_name, IO_CHUNK 버퍼)
+ * 3. filesys_lock을 잡고 파일 시스템 함수 호출, 바로 해제
+ * 4. 결과를 rax에 씀
+ * 락을 쥔 채 유저 메모리를 건드리지 않는 것이 핵심 규칙임. 프로젝트 3에서 page fault 처리가
+ * 같은 락을 잡으면 재귀 획득으로 패닉이 나기 때문임 (IO_CHUNK, copy_name 주석 참고).
+ *
+ * 잘못된 포인터는 프로세스를 끝내고(sys_exit(-1)), 잘못된 fd는 실패값만 돌려줌.
+ * 포인터는 커널 메모리를 위협하지만 fd는 테이블 범위 검사만으로 안전하기 때문임.
+ *
+ * @param[in,out] f 유저 레지스터가 저장된 인터럽트 프레임. rax에 반환값을 씀
+ */
 void
 syscall_handler (struct intr_frame *f UNUSED) {
 	int fd = f->R.rdi;

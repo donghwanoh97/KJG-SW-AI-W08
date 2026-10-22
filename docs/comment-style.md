@@ -2,7 +2,7 @@
 
 [← README로 돌아가기](../README.md)
 
-함수와 파일에는 [Doxygen](https://www.doxygen.nl/manual/docblocks.html) 형식의 주석을 답니다. 본문은 한국어로 쓰고 문장 끝은 "~함", "~임" 체를 씁니다. 이 저장소의 `threads/thread.c`, `threads/synch.c`, `devices/timer.c`, `include/threads/*.h`가 이 형식을 따릅니다.
+함수와 파일에는 [Doxygen](https://www.doxygen.nl/manual/docblocks.html) 형식의 주석을 답니다. 본문은 한국어로 쓰고 문장 끝은 "~함", "~임" 체를 씁니다. 이 저장소의 `threads/thread.c`, `threads/synch.c`, `devices/timer.c`, `include/threads/*.h`와 Project 2에서 작성한 함수(`userprog/syscall.c`, `userprog/process.c`의 `process_*`/`load`/`__do_fork`/`duplicate_pte`, `userprog/exception.c`의 `page_fault`, `include/userprog/process.h`의 구조체)가 이 형식을 따릅니다.
 
 ## 기본 형식
 
@@ -45,7 +45,8 @@ thread_requeue (struct thread *t) {
 - 동작이 바뀌면 주석도 같이 고칩니다. 코드와 안 맞는 주석은 없는 것보다 나쁩니다.
 - 인터럽트, lock, 정렬 같은 불변식 조건은 `@note`에 반드시 적습니다.
 - 구조체 필드는 `/** */` 대신 필드 오른쪽에 `/* ... */`로 짧게 달아도 됩니다(`struct thread`처럼).
-- 원본 Pintos에서 번역한 일부 함수는 아직 `/* ... */` 주석이라 Doxygen 형식이 아닙니다. 건드릴 때 같이 바꿔 주세요.
+- 함수 본문 안의 주석은 `/* ... */`나 `//`를 씁니다. 본문 안에 `/** */`를 쓰면 Doxygen이 엉뚱한 곳에 붙입니다.
+- 원본 Pintos에서 번역한 일부 함수(`load_segment`, `setup_stack`, `install_page` 등 손대지 않은 함수)는 아직 `/* ... */` 주석이라 Doxygen 형식이 아닙니다. 건드릴 때 같이 바꿔 주세요.
 
 ## HTML 문서로 보기
 
