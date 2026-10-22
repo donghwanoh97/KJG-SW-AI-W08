@@ -364,7 +364,7 @@ syscall_handler (struct intr_frame *f UNUSED) {
 		case SYS_EXEC:
 			check_address(f->R.rdi);	
 			size_t len = strlen((char *)f->R.rdi) + 1;
-			char *k = palloc_get_page(len);
+			char *k = palloc_get_page(0);
 			if (k == NULL) {
 				sys_exit(-1);
 			}

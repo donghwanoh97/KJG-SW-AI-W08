@@ -719,11 +719,12 @@ load (const char *file_name, struct intr_frame *if_) {
 		goto done;
 	}
 
+	lock_acquire(&filesys_lock);
 	/* 실행 파일을 엶. */
 	file = filesys_open (argv[0]);
 	if (file == NULL) {
 		printf ("load: %s: open failed\n", argv[0]);
-		goto done;
+		goto filesys_done;
 	}
 	file_deny_write(file);
 	t->using_file = file;
@@ -737,7 +738,7 @@ load (const char *file_name, struct intr_frame *if_) {
 			|| ehdr.e_phentsize != sizeof (struct Phdr)
 			|| ehdr.e_phnum > 1024) {
 		printf ("load: %s: error loading executable\n", argv[0]);
-		goto done;
+		goto filesys_done;
 	}
 
 	/* 프로그램 헤더를 읽음. */
@@ -746,11 +747,11 @@ load (const char *file_name, struct intr_frame *if_) {
 		struct Phdr phdr;
 
 		if (file_ofs < 0 || file_ofs > file_length (file))
-			goto done;
+			goto filesys_done;
 		file_seek (file, file_ofs);
 
 		if (file_read (file, &phdr, sizeof phdr) != sizeof phdr)
-			goto done;
+			goto filesys_done;
 		file_ofs += sizeof phdr;
 		switch (phdr.p_type) {
 			case PT_NULL:
@@ -763,7 +764,7 @@ load (const char *file_name, struct intr_frame *if_) {
 			case PT_DYNAMIC:
 			case PT_INTERP:
 			case PT_SHLIB:
-				goto done;
+				goto filesys_done;
 			case PT_LOAD:
 				if (validate_segment (&phdr, file)) {
 					bool writable = (phdr.p_flags & PF_W) != 0;
@@ -785,17 +786,17 @@ load (const char *file_name, struct intr_frame *if_) {
 					}
 					if (!load_segment (file, file_page, (void *) mem_page,
 								read_bytes, zero_bytes, writable))
-						goto done;
+						goto filesys_done;
 				}
 				else
-					goto done;
+					goto filesys_done;
 				break;
 		}
 	}
 
 	/* 스택을 설정함. */
 	if (!setup_stack(if_))
-		goto done;
+		goto filesys_done;
 
 	/* 시작 주소. */
 	if_->rip = ehdr.e_entry;
@@ -825,6 +826,8 @@ load (const char *file_name, struct intr_frame *if_) {
 
 	success = true;
 
+filesys_done:
+	lock_release(&filesys_lock);
 done:
 	/* 로드가 성공하든 실패하든 여기에 도달함. */
 	return success;
