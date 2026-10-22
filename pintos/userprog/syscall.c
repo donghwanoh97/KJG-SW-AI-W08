@@ -434,6 +434,10 @@ syscall_handler (struct intr_frame *f UNUSED) {
 			if (file == NULL) {	// 잘못된 fd면 아무것도 안 함
 				break;
 			}
+			// off_t(int32)로 바꾸면 음수가 되어 file_seek의 ASSERT에서 커널 패닉이 나므로 무시
+			if (position > INT32_MAX) {	
+				break;
+			}
 
 			lock_acquire(&filesys_lock);
 			file_seek(file, position);
