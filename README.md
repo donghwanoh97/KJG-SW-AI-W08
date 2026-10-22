@@ -1,78 +1,131 @@
-# SW-AI-W08 · KAIST Pintos (x86-64) Project 2: User Programs
+# 📘 Docker기반 Pintos 개발 환경 구축 가이드 
 
-크래프톤 정글 SW-AI Lab 13기 8주차 팀 프로젝트입니다. KAIST Pintos(x86-64)의 Project 2(User Programs)를 구현했고, Project 3(Virtual Memory)를 시작하는 팀이 이어서 작업할 수 있도록 진행 상황과 구현 방식, 넘겨줄 주의점을 문서로 남깁니다.
+이 문서는 **Windows**와 **macOS** 사용자가 Docker와 VSCode DevContainer 기능을 활용하여 Pintos OS 프로젝트를 빠르게 구축할 수 있도록 도와줍니다.
 
-> 이 저장소는 **KAIST Pintos(64비트)** 기준입니다. Stanford Pintos(32비트) 자료는 함수 이름, 구조체, 레지스터 이름이 다를 수 있으니 이 저장소의 코드와 먼저 대조해 주세요.
-> 공식 문서: https://casys-kaist.github.io/pintos-kaist/
+[**주의**]
+* ubunbu:22.04 버전은 충분한 테스트와 검증이 되지 않았습니다. 이 점을 주의해서 사용하시기 바랍니다.
 
-## 팀 구성
+[**참고**] 
+* pintos 도커 환경은 `64비트 기반 X86-64` 기반의 `ubuntu:22.04` 버전을 사용합니다.
+   * kaist-pintos는 오리지널 pintos와 달리 64비트 환경을 지원합니다.
+   * 이번 도커 환경은 ubuntu 22.04를 지원하여 vscode의 최신 버전에서 원격 연결이 안되는 문제를 해결하였습니다.
+* pintos 도커 환경은 kaist-pintos에서 추천하는 qemu 에뮬레이터를 설치하고 사용합니다. 
+* pintos 도커 환경은 9주차부터 13주차까지 같은 환경을 사용합니다. 이 기간동안 별도의 개발 환경을 제공하지 않습니다.
+* 기존 도커 환경과 달리 `vscode`와 통합된 디버깅 환경(F5로 시작하는)을 제공하지 않습니다. 디버깅이 필요한 경우 `gdb`를 사용하세요. 
+* vscode에서 터미널을 오픈하면 자동으로 `source /workspaces/pintos_22.04_lab_docker/pintos/activate`를 실행합니다.
 
-<table align="center">
-  <tr>
-    <td align="center" width="33%">
-      <a href="https://github.com/NARi3040"><img src="https://github.com/NARi3040.png?size=200" width="150" alt="박준호"></a><br><br>
-      <a href="https://github.com/NARi3040"><b>박준호</b></a>
-    </td>
-    <td align="center" width="33%">
-      <a href="https://github.com/donghwanoh97"><img src="https://github.com/donghwanoh97.png?size=200" width="150" alt="오동환"></a><br><br>
-      <a href="https://github.com/donghwanoh97"><b>오동환</b></a>
-    </td>
-    <td align="center" width="33%">
-      <a href="https://github.com/jye-1123"><img src="https://github.com/jye-1123.png?size=200" width="150" alt="지영은"></a><br><br>
-      <a href="https://github.com/jye-1123"><b>지영은</b></a>
-    </td>
-  </tr>
-</table>
+---
 
-### 학습 및 코드 관리 방식
+## 1. Docker란 무엇인가요?
 
-- 테스트 통과보다 **공부를 우선**으로 진행했습니다.
-- 역할은 1번 IO(fd 테이블, 파일 시스템 콜) / 2번 종료·검증(`exit` `wait` `exec` `halt`, 유저 포인터 검증, page fault) / 3번 fork·보호(`fork`, `load`, deny-write)로 나눴습니다.
-- 코어타임에 모여 코드 리뷰를 한 뒤, 살아남은 코드만 `main`에 머지합니다.
+**Docker**는 애플리케이션을 어떤 컴퓨터에서든 **동일한 환경에서 실행**할 수 있게 도와주는 **가상화 플랫폼**입니다.  
 
-## 현재 상태
+Docker는 다음 구성요소로 이루어져 있습니다:
 
-**Project 2 필수 범위 완료.** `pintos/userprog`에서 `make check` 결과 **95개 전부 통과**입니다(userprog, filesys/base, no-vm/multi-oom, threads alarm/priority 포함).
+- **Docker Engine**: 컨테이너를 실행하는 핵심 서비스
+- **Docker Image**: 컨테이너 생성에 사용되는 템플릿 (레시피 📃)
+- **Docker Container**: 이미지를 기반으로 생성된 실제 실행 환경 (요리 🍜)
 
-| 영역 | 상태 |
-| --- | --- |
-| Argument Passing | 완료 |
-| 유저 메모리 검증 | 완료 (`check_address`, `check_buffer`, `copy_name`) |
-| `halt` `exit` `exec` `wait` `fork` | 완료 |
-| 파일 시스템 콜 (`create` `remove` `open` `close` `read` `write` `filesize` `seek` `tell`) | 완료 |
-| 종료 메시지 `name: exit(status)` | 완료 |
-| 실행 중인 파일 쓰기 금지 (`rox-*`) | 완료 |
-| `dup2` (extra) | **미구현** (`SYS_DUP2` case만 있음, 테스트도 `Make.vars`에서 주석 처리) |
-| Project 1 MLFQS | 미구현 (P2/P3 채점에 없음) |
+### ✅ AWS EC2와의 차이점
 
-## 문서
+| 구분 | EC2 같은 VM | Docker 컨테이너 |
+|------|-------------|-----------------|
+| 실행 단위 | OS 포함 전체 | 애플리케이션 단위 |
+| 실행 속도 | 느림 (수십 초 이상) | 매우 빠름 (거의 즉시) |
+| 리소스 사용 | 무거움 | 가벼움 |
 
-Project 3을 시작한다면 위에서부터 순서대로 읽는 것을 추천합니다.
+---
 
-| 문서 | 내용 |
-| --- | --- |
-| [Project 2 구현 방식](docs/userprog-implementation.md) | 프로세스 구조체, fork/wait/exit 동기화, fd 테이블, 락 규칙, 알려진 한계 |
-| [Project 3 시작 가이드](docs/project3-guide.md) | 범위와 배점, 테스트 묶음, 추천 구현 순서, 스켈레톤 위치 |
-| [Project 3 인수인계: P2 코드에서 바꿔야 할 곳](docs/project3-handoff.md) | VM을 켜면 깨지거나 손봐야 하는 P2 코드 체크리스트 |
-| [개발 환경과 테스트](docs/dev-environment.md) | DevContainer, 빌드와 테스트 실행, pintos-util |
-| [주석 규칙](docs/comment-style.md) | Doxygen 주석 형식과 HTML 문서 생성. P2에서 작성한 함수의 설계 의도는 소스의 Doxygen 주석에 있음 |
-| [스레드 사용 가이드 (P1)](docs/thread-guide.md) | 스케줄러 동작과 지켜야 할 불변식 |
-| [P1 구현 방식](docs/implementation.md) | Alarm Clock, Priority Scheduling, Priority Donation |
+## 2. VSCode DevContainer란 무엇인가요?
 
-핵심 규칙 네 가지만 먼저 기억해 주세요.
+**DevContainer**는 VSCode에서 Docker 컨테이너를 **개발 환경**처럼 사용할 수 있게 해주는 기능입니다.
 
-- 파일 시스템 함수(`file_*`, `filesys_*`)는 전역 `filesys_lock`을 잡고 호출합니다. **락을 쥔 채 유저 메모리를 건드리지 않습니다** (P3에서 page fault가 같은 락을 잡으면 패닉).
-- 유저 포인터는 시스템 콜에서 쓰기 전에 검증하고, 잘못되면 `sys_exit(-1)`로 종료합니다.
-- 종료 메시지는 `process_exit()` 한 곳에서만 출력합니다.
-- `ready_list`는 항상 priority 내림차순입니다. READY 스레드의 priority를 바꾸면 `thread_requeue()`를 호출해야 합니다 (P1).
+- 코드를 실행하거나 디버깅할 때 **컨테이너 내부 환경에서 동작**
+- 팀원 간 **환경 차이 없이 동일한 개발 환경 구성** 가능
+- `.devcontainer` 폴더에 정의된 설정을 VSCode가 읽어 자동 구성
 
-## 빠른 시작
+---
 
-VSCode에서 `Dev Containers: Reopen in Container`로 열고, 컨테이너 터미널에서 실행합니다. 호스트의 최신 gcc로는 빌드가 깨질 수 있으니 반드시 컨테이너 안에서 빌드해 주세요.
+## 3. Docker Desktop 설치하기
+
+1. Docker 공식 사이트에서 설치 파일 다운로드:  
+   👉 [https://www.docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop)
+
+2. 설치 후 Docker Desktop 실행  
+   - Windows: Docker 아이콘이 트레이에 떠야 함  
+   - macOS: 상단 메뉴바에 Docker 아이콘 확인
+
+---
+
+## 4. 프로젝트 파일 다운로드 (히스토리 없이)
+
+터미널(CMD, PowerShell, zsh 등)에서 아래 명령어로 프로젝트 폴더만 내려받습니다:
 
 ```bash
-cd pintos/userprog         # Project 3은 pintos/vm
-make check                 # 전체 테스트
+git clone --depth=1 https://github.com/krafton-jungle/pintos_22.04_lab_docker.git 
 ```
 
-한 테스트만 돌리거나 `pintos` 명령이 안 잡힐 때의 주의사항은 [개발 환경과 테스트](docs/dev-environment.md)에 있습니다.
+- `--depth=1` 옵션은 git commit 히스토리를 생략하고 **최신 파일만 가져옵니다.**
+
+### 📂 다운로드 후 폴더 구조 설명
+
+```
+pintos_22.04_lab_docker/
+├── .devcontainer/
+│   ├── devcontainer.json      # VSCode에서 컨테이너 환경 설정
+│   └── Dockerfile             # pintos 개발 환경 도커 이미지 정의
+│
+├── pintos
+│   ├── threads                # 9주차 threads 프로젝트 폴더
+│   ├── userprog               # 10-11주차 user program 프로젝트 폴더
+│   └── vm                     # 12-13주차 virtual memory 프로젝트 폴더
+│
+└── README.md                  # 현재 문서
+```
+---
+
+## 5. VSCode에서 해당 프로젝트 폴더 열기
+
+1. VSCode를 실행
+2. `파일 → 폴더 열기`로 방금 클론한 `pintos_22.04_lab_docker` 폴더를 선택
+
+---
+
+## 6. 개발 컨테이너: 컨테이너에서 열기
+
+1. VSCode에서 `Ctrl+Shift+P` (Windows/Linux) 또는 `Cmd+Shift+P` (macOS)를 누릅니다.
+2. 명령어 팔레트에서 `Dev Containers: Reopen in Container`를 선택합니다.
+3. 이후 컨테이너가 자동으로 실행되고 빌드됩니다. 처음 컨테이너를 열면 빌드하는 시간이 오래걸릴 수 있습니다. 빌드 후, 프로젝트가 **컨테이너 안에서 실행됨**.
+
+---
+
+## 7. C 파일에 브레이크포인트 설정 후 디버깅 (F5)
+pintos 랩에서는 vscode기반의 디버깅을 지원하지 않습니다. 
+
+---
+## 8. 새로운 Git 리포지토리에 Commit & Push 하기
+
+금주 프로젝트를 개인 Git 리포와 같은 다른 리포지토리에 업로드하려면, 기존 Git 연결을 제거하고 새롭게 초기화해야 합니다.
+
+### ✅ 완전히 새로운 Git 리포로 업로드하는 방법
+
+아래 명령어를 순서대로 실행하세요:
+
+```bash
+rm -rf .git
+git init
+git remote add origin https://github.com/myusername/my-new-repo.git
+git add .
+git commit -m "Clean start"
+git push -u origin main
+```
+
+### 📌 설명
+
+- `rm -rf .git`: 기존 Git 기록과 연결을 완전히 삭제합니다.
+- `git init`: 현재 폴더를 새로운 Git 리포지토리로 초기화합니다.
+- `git remote add origin ...`: 새로운 리포지토리 주소를 origin으로 등록합니다.
+- `git add .` 및 `git commit`: 모든 파일을 커밋합니다.
+- `git push`: 새로운 리포에 최초 업로드(Push)합니다.
+
+이 과정을 거치면 기존 리포와의 연결은 완전히 제거되고, **새로운 독립적인 프로젝트로 관리**할 수 있습니다.
