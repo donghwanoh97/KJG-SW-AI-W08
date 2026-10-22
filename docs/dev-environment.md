@@ -7,7 +7,7 @@
 ```bash
 cd pintos
 source ./activate          # pintos 명령을 PATH에 추가 (DevContainer 터미널에서는 자동)
-cd threads
+cd threads                 # Project 2는 userprog, Project 3은 vm
 make                       # 빌드
 make check                 # 전체 테스트
 ```
