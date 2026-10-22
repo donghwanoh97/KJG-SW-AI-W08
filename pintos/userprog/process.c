@@ -41,12 +41,27 @@ process_init (void) {
 	struct thread *current = thread_current ();
 }
 
-/* FILE_NAME에서 로드한 첫 번째 유저랜드(userland) 프로그램 "initd"를
- * 시작함.
- * 새 스레드는 process_create_initd()가 반환되기 전에 스케줄될 수 있고
- * (심지어 종료될 수도 있음).  initd의 스레드 id를 반환하며, 스레드를
- * 생성할 수 없으면 TID_ERROR를 반환함.
- * 이 함수는 반드시 한 번만 호출되어야 함에 주의할 것. */
+/**
+ * @brief 명령줄 FILE_NAME으로 첫 번째 유저 프로그램 "initd"를 시작함
+ *
+ * @details
+ * 명령줄을 두 벌로 나눠 씀.
+ * - fn_copy: 명령줄 전체를 담은 palloc 페이지. initd → process_exec() → load()로 넘어가
+ *   인자 전달에 쓰이고 process_exec()가 해제함. 호출자의 file_name은 이 함수가 반환되면
+ *   사라질 수 있어서(경쟁 상태) 페이지로 복사해 둠
+ * - name_copy: 스레드 이름용. 종료 메시지가 "args-single: exit(0)"처럼 프로그램 이름만
+ *   찍어야 하므로, 명령줄의 첫 단어만 잘라 thread_create()의 이름으로 씀
+ *
+ * name_copy를 따로 둔 이유는 strtok_r가 원본 문자열에 NUL을 써 넣기 때문임.
+ * fn_copy를 자르면 load()가 인자를 못 읽게 됨.
+ *
+ * @param[in] file_name 커널 명령줄에서 받은 실행 명령 (예: "args-single onearg")
+ * @return initd의 tid. 페이지 할당, 이름 추출, 스레드 생성 중 하나라도 실패하면 TID_ERROR
+ *
+ * @note 새 스레드는 이 함수가 반환되기 전에 스케줄될 수 있고, 종료될 수도 있음
+ * @note 반드시 한 번만 호출해야 함 (threads/init.c의 run_task())
+ * @note name_copy는 struct thread의 name 크기(16)에 맞춰 15글자까지만 담음
+ */
 tid_t
 process_create_initd (const char *file_name) {
 	char *fn_copy;
@@ -59,11 +74,9 @@ process_create_initd (const char *file_name) {
 		return TID_ERROR;
 	strlcpy (fn_copy, file_name, PGSIZE);
 
-	/**
-	 * strtok_r로 실행파일 이름용 복사본 만들기
-	 * 실행과 인자 전달 사용할 전체 명렬줄 fn_copy는 유지
-	 * 현재 구현은 스레드 이름 크기에 맞춰 최대 15문자만 보관중(임시)
-	 */
+	/* strtok_r로 실행 파일 이름용 복사본을 만듦.
+	 * 실행과 인자 전달에 쓸 전체 명령줄 fn_copy는 그대로 유지함.
+	 * 현재 구현은 스레드 이름 크기에 맞춰 최대 15문자만 보관함(임시). */
 	char name_copy[16];
 	char *save_ptr;
 
@@ -83,7 +96,18 @@ process_create_initd (const char *file_name) {
 	return tid;
 }
 
-/* 첫 번째 유저 프로세스를 실행하는 스레드 함수. */
+/**
+ * @brief 첫 번째 유저 프로세스를 실행하는 스레드 함수
+ *
+ * @details
+ * fd 테이블은 유저 프로세스만 가지므로 thread_create()가 아니라 여기서 만듦.
+ * 다른 유저 프로세스는 모두 fork로 생기고 __do_fork()에서 테이블을 만들기 때문에,
+ * fd_table_create() 호출 지점은 이곳과 __do_fork() 두 곳뿐임.
+ *
+ * @param[in] f_name process_create_initd()가 만든 명령줄 페이지 (소유권 넘겨받음)
+ *
+ * @note 반환하지 않음. 로드에 실패하면 실행할 유저 프로그램이 없으므로 PANIC
+ */
 static void
 initd (void *f_name) {
 #ifdef VM
@@ -98,8 +122,30 @@ initd (void *f_name) {
 	NOT_REACHED ();
 }
 
-/* 현재 프로세스를 `name`이라는 이름으로 복제함. 새 프로세스의 스레드 id를
- * 반환하며, 스레드를 생성할 수 없으면 TID_ERROR를 반환함. */
+/**
+ * @brief 현재 프로세스를 NAME이라는 이름의 자식 프로세스로 복제함
+ *
+ * @details
+ * 자식이 복제할 유저 컨텍스트(유저 레지스터)는 parent->tf에 없음. tf는 커널 스레드끼리
+ * 전환할 때 쓰는 프레임이라 시스템 콜에 들어온 시점의 유저 레지스터가 아니기 때문임.
+ * 그래서 시스템 콜 진입 때 받은 IF_ 주소를 fork_if에 남기고, 자식 스레드에 부모 포인터를
+ * aux로 넘겨 __do_fork()가 읽어 가게 함.
+ *
+ * 그다음 자식의 fork_sema에서 기다림. 이유는 두 가지임.
+ * - fork()의 반환값을 정하려면 자식의 복제 성공 여부(fork_success)를 알아야 함
+ * - IF_는 부모 커널 스택에 있는 프레임이라, 부모가 먼저 유저로 돌아가면 덮어써짐.
+ *   자식이 복사를 끝낼 때까지 부모를 붙잡아 둬야 주소만 넘겨도 안전함
+ *
+ * 자식의 child_info는 thread_create()가 children 맨 뒤에 넣어 둠. tid로 찾아서 그 기록의
+ * 세마포어를 씀.
+ *
+ * @param[in] name 자식 스레드 이름 (유저가 넘긴 문자열)
+ * @param[in] if_ 시스템 콜 진입 시점의 부모 유저 레지스터
+ * @return 자식의 tid. 스레드 생성이나 자식 쪽 복제가 실패하면 TID_ERROR
+ *
+ * @note 부모는 0이 아닌 tid를, 자식은 __do_fork()에서 rax = 0으로 fork()에서 돌아감
+ * @see __do_fork(), duplicate_pte()
+ */
 tid_t
 process_fork (const char *name, struct intr_frame *if_) {
 	/* 현재 스레드를 새 스레드로 복제함. */
@@ -124,8 +170,27 @@ process_fork (const char *name, struct intr_frame *if_) {
 }
 
 #ifndef VM
-/* 이 함수를 pml4_for_each에 넘겨서 부모의 주소 공간을 복제함.
- * project 2 전용임. */
+/**
+ * @brief 부모 페이지 테이블의 항목 하나를 자식 주소 공간으로 복사함 (pml4_for_each 콜백)
+ *
+ * @details
+ * 부모와 자식은 같은 가상 주소를 쓰지만 서로 다른 물리 페이지를 가져야 함.
+ * 한쪽이 쓴 값이 다른 쪽에 보이면 안 되기 때문임. 그래서 매핑을 공유하지 않고
+ * 새 유저 페이지를 받아 내용을 통째로 복사한 뒤 자식 pml4의 같은 VA에 붙임.
+ *
+ * - 커널 영역은 건너뜀. pml4_create()가 커널 매핑을 이미 모든 프로세스에 공통으로 넣어 두므로
+ *   복사할 대상이 아님
+ * - 쓰기 권한은 부모 PTE에서 그대로 가져옴. 코드 영역이 자식에서 쓰기 가능해지면 안 되기 때문임
+ *
+ * @param[in] pte 부모의 페이지 테이블 항목
+ * @param[in] va pte가 매핑하는 가상 주소
+ * @param[in] aux 부모 struct thread *
+ * @return 복사했거나 건너뛰었으면 true. 할당이나 매핑에 실패하면 false여서 순회가 멈춤
+ *
+ * @note 실패 시 방금 받은 페이지는 여기서 해제함. 이미 붙인 페이지들은 자식 종료 때
+ *       process_cleanup()의 pml4_destroy()가 해제함
+ * @note project 2 전용. VM 빌드에서는 supplemental_page_table_copy()가 대신함
+ */
 static bool
 duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	struct thread *current = thread_current ();
@@ -164,9 +229,31 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 }
 #endif
 
-/* 부모의 실행 컨텍스트(execution context)를 복사하는 스레드 함수.
- * 힌트) parent->tf는 프로세스의 유저랜드 컨텍스트를 가지고 있지 않음.
- *       즉, process_fork의 두 번째 인자를 이 함수에 넘겨줘야 함. */
+/**
+ * @brief 자식 스레드에서 부모의 유저 컨텍스트, 주소 공간, fd 테이블을 복제하는 스레드 함수
+ *
+ * @details
+ * 순서는 다음과 같음.
+ * 1. parent->fork_if를 로컬 if_로 복사. 부모가 깨어나면 원본이 사라지므로 먼저 복사함
+ * 2. 새 pml4를 만들고 활성화한 뒤 duplicate_pte()로 유저 페이지를 하나씩 복제
+ * 3. fd 테이블을 새로 만들고 열린 파일마다 file_duplicate()
+ *    - file_reopen()이 아니라 file_duplicate()를 쓰는 이유: 파일 위치(pos)와 deny_write까지
+ *      그대로 이어받아야 fork 직후 자식이 부모와 같은 위치에서 읽고 쓸 수 있음
+ *    - struct file을 공유하지 않고 복제하는 이유: 한쪽이 close해도 다른 쪽 파일이 살아 있어야 하고,
+ *      공유하면 누가 마지막에 닫을지 참조 수를 따로 세야 함
+ *    - 같은 fd 번호 칸에 넣어서 자식도 부모와 같은 fd 번호로 파일을 씀
+ * 4. fork_success를 쓰고 fork_sema를 올려 부모를 깨움
+ * 5. rax = 0으로 바꿔 do_iret. 자식 쪽 fork()는 0을 반환함
+ *
+ * 실패하면 fork_success = false로 부모를 깨운 뒤 thread_exit()함. 반쯤 복제된 자원은
+ * process_exit()가 정리함(fd_table_close_all, process_cleanup).
+ *
+ * @param[in] aux 부모 struct thread * (process_fork()가 넘김)
+ *
+ * @note 반환하지 않음. 성공하면 유저 모드로, 실패하면 thread_exit()로 감
+ * @note fork_sema를 올리기 전에 성공 여부를 써야 함. 부모는 깨어나자마자 fork_success를 읽음
+ * @see process_fork(), duplicate_pte()
+ */
 static void
 __do_fork (void *aux) {
 	struct intr_frame if_;
@@ -224,8 +311,23 @@ error:
 	thread_exit ();
 }
 
-/* 현재 실행 컨텍스트를 f_name으로 전환함.
- * 실패하면 -1을 반환함. */
+/**
+ * @brief 현재 프로세스의 주소 공간을 버리고 명령줄 F_NAME의 프로그램으로 바꿔 실행함
+ *
+ * @details
+ * 같은 스레드(같은 tid, 같은 fd 테이블, 같은 부모-자식 관계)를 유지한 채 유저 메모리만
+ * 새 프로그램으로 갈아 끼움. exec 뒤에도 부모의 wait가 이 프로세스를 그대로 기다릴 수 있음.
+ *
+ * - intr_frame을 struct thread의 tf가 아니라 로컬 변수에 만드는 이유: tf는 컨텍스트 스위치
+ *   때마다 덮어써지므로, load()가 채우는 도중 스케줄되면 값이 깨짐
+ * - load()가 끝나면 명령줄 문자열은 이미 새 유저 스택에 복사되어 있으므로 f_name 페이지를 해제함
+ *
+ * @param[in] f_name palloc으로 받은 명령줄 페이지 (소유권 넘겨받고, 성공·실패 모두 여기서 해제)
+ * @return 성공하면 반환하지 않음. 로드에 실패하면 -1
+ *
+ * @note 실패해도 기존 주소 공간은 process_cleanup()으로 이미 사라진 상태임.
+ *       유저로 돌아갈 곳이 없으므로 호출한 쪽(SYS_EXEC)이 sys_exit(-1)로 끝내야 함
+ */
 int
 process_exec (void *f_name) {
 	char *file_name = f_name;
@@ -257,14 +359,26 @@ process_exec (void *f_name) {
 }
 
 
-/* 스레드 TID가 종료되기를 기다렸다가 그 종료 상태(exit status)를
- * 반환함.  커널에 의해 종료된 경우(즉, 예외로 인해 kill된 경우)
- * -1을 반환함.  TID가 유효하지 않거나, 호출한 프로세스의 자식이
- * 아니거나, 주어진 TID에 대해 process_wait()가 이미 성공적으로
- * 호출된 적이 있으면, 기다리지 않고 즉시 -1을 반환함.
+/**
+ * @brief 자식 CHILD_TID가 종료되기를 기다렸다가 그 종료 상태를 반환함
  *
- * 이 함수는 problem 2-2에서 구현할 것임.  지금은 아무 일도
- * 하지 않음. */
+ * @details
+ * 종료 상태를 자식의 struct thread가 아니라 child_info에서 읽음. 자식이 먼저 죽으면
+ * struct thread는 페이지째 해제되지만 child_info는 부모가 회수할 때까지 남아 있기 때문임.
+ * 그래서 자식이 이미 죽은 뒤에 wait해도 상태를 받을 수 있음.
+ *
+ * - 자식이 아직 살아 있으면 wait_sema에서 잠듦. 자식은 process_exit()에서 상태를 쓴 뒤 sema_up함
+ * - 자식이 이미 죽었으면 wait_sema 값이 1이라 바로 통과함
+ * - 회수한 기록은 children에서 빼고 free함. 같은 tid를 다시 wait하면 찾지 못해 -1이 됨(wait-twice)
+ * - children은 직계 자식만 담으므로, 손자나 남의 tid는 찾지 못해 -1이 됨(wait-bad-pid)
+ *
+ * @param[in] child_tid 기다릴 자식의 tid
+ * @return 자식의 종료 상태. 직계 자식이 아니거나 이미 wait한 tid면 기다리지 않고 -1
+ *
+ * @note 커널이 죽인 경우(잘못된 포인터, page fault)는 sys_exit(-1)을 거치므로 -1이 됨.
+ *       child_info의 exit_status 기본값도 -1임
+ * @see process_exit()
+ */
 int
 process_wait (tid_t child_tid) {
 	/* XXX: 힌트) process_wait (initd)를 하면 pintos가 종료되므로,
@@ -292,7 +406,31 @@ process_wait (tid_t child_tid) {
 	return -1; // 직계자식이 아닌 경우
 }
 
-/* 프로세스를 종료함. 이 함수는 thread_exit()가 호출함. */
+/**
+ * @brief 현재 프로세스를 종료하며 종료 메시지 출력, 자원 해제, 부모-자식 기록 정리를 함
+ *
+ * @details
+ * exit 시스템 콜, 잘못된 포인터, page fault, fork 실패 등 모든 종료 경로가 thread_exit()를
+ * 거쳐 여기로 모임. 그래서 종료 메시지를 이 함수 한 곳에서만 출력해 중복이나 누락이 없게 함.
+ * pml4가 없는 커널 스레드는 유저 프로세스가 아니므로 메시지를 찍지 않음.
+ *
+ * 순서와 이유는 다음과 같음.
+ * 1. 종료 상태 결정: exit_info → self_info → -1 순으로 찾음. exit_info 할당이 실패해도 상태를 잃지 않음
+ * 2. fd_table_close_all(), process_cleanup(): 부모가 wait에서 깨어나기 전에 파일과 주소 공간을 놓음
+ * 3. 부모 역할 정리: 남은 자식 기록마다 자식이 이미 죽었으면 free, 살아 있으면 parent_exited만 표시.
+ *    살아 있는 자식은 나중에 자기 기록을 직접 free함
+ * 4. 자식 역할 정리: 내 기록에 상태를 쓰고 부모가 살아 있으면 sema_up, 부모가 이미 죽었으면 직접 free
+ * 5. 실행 파일(using_file)을 닫아 deny-write를 풀어 줌
+ *
+ * child_info는 부모와 자식이 공유하므로 "나중에 끝난 쪽이 free한다"는 규칙으로 해제함.
+ * 부모와 자식이 동시에 종료할 수 있으므로, 상대 플래그를 읽고 내 플래그를 쓰는 구간을
+ * 인터럽트를 끈 채로 묶어 둘 다 free하거나 둘 다 안 하는 경우를 막음.
+ * 락 대신 인터럽트를 끈 이유는 구간이 짧고, 단일 CPU에서는 이것만으로 원자성이 보장되기 때문임.
+ *
+ * @note thread_exit()에서만 호출됨
+ * @note sema_up 이후에는 부모가 info를 free할 수 있으므로 info에 다시 접근하지 않음
+ * @see sys_exit(), process_wait()
+ */
 void
 process_exit (void) {
 	struct thread *curr = thread_current ();
@@ -455,10 +593,33 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		uint32_t read_bytes, uint32_t zero_bytes,
 		bool writable);
 
-/* FILE_NAME의 ELF 실행 파일을 현재 스레드에 로드함.
- * 실행 파일의 진입점(entry point)을 *RIP에,
- * 초기 스택 포인터를 *RSP에 저장함.
- * 성공하면 true를, 그렇지 않으면 false를 반환함. */
+/**
+ * @brief 명령줄 FILE_NAME의 ELF 실행 파일을 현재 스레드에 로드하고 인자를 유저 스택에 쌓음
+ *
+ * @details
+ * 1. 명령줄 분리: strtok_r로 공백 기준으로 잘라 argv[]에 담음. 연속 공백은 strtok_r가
+ *    알아서 건너뜀(args-dbl-space). argv[0]이 실행 파일 이름임
+ * 2. 실행 파일 열기와 deny-write: 연 직후 file_deny_write()를 걸고 using_file에 보관함.
+ *    실행 중인 코드를 누가 덮어쓰면 안 되기 때문임(rox-*). 파일을 여기서 닫지 않고
+ *    process_exit()까지 열어 두는 이유는, 닫으면 쓰기 금지도 같이 풀리기 때문임
+ * 3. ELF 헤더와 세그먼트 로드, setup_stack()
+ * 4. 인자 전달: x86-64 호출 규약에 맞춰 유저 스택에 위에서 아래로 쌓음
+ *    - 문자열들을 뒤에서부터 복사하고 argv[i]를 유저 스택 주소로 바꿔 씀
+ *    - 8바이트 정렬로 내림. 이후 쌓는 포인터들이 정렬된 주소에 놓이게 함
+ *    - argv[] 포인터 배열(argv[argc] = NULL 포함)을 한 번에 복사
+ *    - 가짜 return address(0)를 넣음. main이 보통 함수처럼 호출된 것과 같은 스택 모양이 됨
+ *    - rdi = argc, rsi = argv 배열 주소, rsp = 가짜 return address 위치
+ *
+ * 문자열을 스택에 바로 memcpy할 수 있는 이유는 load() 앞부분에서 새 pml4를 활성화해 두어
+ * 유저 주소가 현재 스레드의 주소 공간으로 해석되기 때문임.
+ *
+ * @param[in,out] file_name 명령줄 문자열. strtok_r가 공백 자리에 NUL을 써 넣으므로 내용이 바뀜
+ * @param[out] if_ 진입점(rip), 스택(rsp), 인자 레지스터(rdi, rsi)를 채울 프레임
+ * @return 성공하면 true, 파일 열기, ELF 검증, 메모리 할당 중 하나라도 실패하면 false
+ *
+ * @note 실패해도 using_file은 여기서 닫지 않음. process_exit()가 닫음
+ * @note 인자는 최대 MAX_ARGS - 1개. 넘는 인자는 버림
+ */
 static bool
 load (const char *file_name, struct intr_frame *if_) {
 	struct thread *t = thread_current ();
